@@ -105,7 +105,7 @@ def get_facecood(mesh, normalize=True):
 
 def simplify_mesh(mesh, target_faces):
     """简化 mesh 并返回降采样后的 face_coord"""
-    simplified_mesh = mesh.simplify_quadratic_decimation(target_faces)
+    simplified_mesh = mesh.simplify_quadric_decimation(target_faces) #simplify_quadric_decimation
     face_coord = get_facecood(simplified_mesh)
     return face_coord
 
