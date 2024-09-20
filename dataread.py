@@ -4,6 +4,7 @@ from torch.utils.data import Dataset, DataLoader
 from mesh_to_pc import process_shapenet_models
 import pickle
 from datetime import datetime
+import open3d as o3d
 
 class GLBDataset(Dataset):
     def __init__(self, datapath, k = 800 , marching_cubes=True, sample_num=4096, save_path=None):
@@ -37,12 +38,20 @@ class GLBDataset(Dataset):
     
     # 生成保存文件的路径
         file_path = os.path.join(save_dir, 'dataset.pkl')
-    
+        mesh_info_list = []
+        for mesh in self.return_mesh_list:
+            if isinstance(mesh, o3d.geometry.TriangleMesh):
+                mesh_info = mesh.dump()  # 使用Open3D的dump方法
+                mesh_info_list.append(mesh_info)
+            else:
+                # 处理其他类型的mesh对象
+                pass        
+
     # 将数据集保存为pickle文件
         with open(file_path, 'wb') as f:
             pickle.dump({
                 'pc_normal_list': self.pc_normal_list,
-                'return_mesh_list': self.return_mesh_list,
+                'return_mesh_list': mesh_info_list,
                 'face_coods': self.face_coods,
                 'mask': self.mask
             }, f)
@@ -56,7 +65,7 @@ class GLBDataset(Dataset):
             data = pickle.load(f)
         dataset = GLBDataset.__new__(GLBDataset)  # 使用__new__方法创建实例
         dataset.pc_normal_list = data['pc_normal_list']
-        dataset.return_mesh_list = data['return_mesh_list']
+        dataset.return_mesh_list = [o3d.geometry.TriangleMesh.load(mesh_info) for mesh_info in data['return_mesh_list']]
         dataset.face_coods = data['face_coods']
         dataset.mask = data['mask']
         return dataset
