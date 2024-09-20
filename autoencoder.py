@@ -190,7 +190,59 @@ class Attention(nn.Module):
         out = einsum('b i j, b j d -> b i d', attn, v)
         out = rearrange(out, '(b h) n d -> b n (h d)', h = h)
         return self.drop_path(self.to_out(out))
+
+def sort_faces_by_vertex_index(face_coor):
+    """
+    Sorts faces based on the vertex indices in ascending order.
     
+    Parameters:
+    - face_coor: Tensor, shape [batch, num_faces, 3, 3] (batch, num of face, num of vertices per face (3), coords (xyz))
+    
+    Returns:
+    - sorted_face_coor: Tensor, sorted faces according to the vertex indices.
+    """
+    batch_size, num_faces, num_vertices, _ = face_coor.shape
+
+    # Step 1: Flatten the face coordinates and sort them based on the vertex indices
+    face_coor_flat = face_coor.view(batch_size, num_faces, -1)  # [batch, num_faces, 9]
+    min_vertex_indices = torch.argmin(face_coor_flat, dim=-1)  # [batch, num_faces], indices of the min vertex in each face
+
+    # Step 2: Gather the sorted faces using the indices
+    sorted_face_indices = torch.argsort(min_vertex_indices, dim=-1)  # [batch, num_faces]
+    sorted_face_coor = face_coor_flat.gather(1, sorted_face_indices.unsqueeze(-1).expand(-1, -1, 9)).view(batch_size, num_faces, num_vertices, 3)
+
+    return sorted_face_coor
+
+def sort_faces_by_vertex_coordinate(face_coor):
+    """
+    Sorts faces based on the vertex coordinates in a specific order (y, z, x).
+    
+    Parameters:
+    - face_coor: Tensor, shape [batch, num_faces, 3, 3] (batch, num of face, num of vertices per face (3), coords (xyz))
+    
+    Returns:
+    - sorted_face_coor: Tensor, sorted faces according to the vertex coordinates.
+    """
+    batch_size, num_faces, num_vertices, coord_dims = face_coor.shape
+
+    # Step 1: Flatten the face coordinates
+    face_coor_flat = face_coor.view(batch_size, num_faces, -1)  # [batch, num_faces, 9]
+
+    # Step 2: Sort the vertices within each face based on their coordinates
+    def sort_vertices(vertex):
+        return vertex[:, 1], vertex[:, 2], vertex[:, 0]  # Sort by y, then z, then x
+
+    sorted_vertices = torch.zeros_like(face_coor_flat)
+    for i in range(batch_size):
+        for j in range(num_faces):
+            vertices = face_coor_flat[i, j]  # Get the vertices of the current face
+            sorted_vertices[i, j] = torch.tensor(sorted(vertices.tolist(), key=lambda x: sort_vertices(np.array(x))))
+
+    # Step 3: Reshape back to the original face coordinate shape
+    sorted_face_coor = sorted_vertices.view(batch_size, num_faces, num_vertices, coord_dims)
+
+    return sorted_face_coor
+
 class AutoEncoder(nn.Module):
     def __init__(
         self,
@@ -270,11 +322,11 @@ class AutoEncoder(nn.Module):
         z_coords = face_coords[..., 2].unsqueeze(-1)
 
         x_embed = self.embed_fn(x_coords)
-        x_embed = rearrange(x_embed, 'b nf nv c -> b nf (nv c)')
+        x_embed = rearrange(x_embed, 'b nd nf nv c -> b nd nf (nv c)')
         y_embed = self.embed_fn(y_coords)
-        y_embed = rearrange(y_embed, 'b nf nv c -> b nf (nv c)')
+        y_embed = rearrange(y_embed, 'b nd nf nv c -> b nd nf (nv c)')
         z_embed = self.embed_fn(z_coords)
-        z_embed = rearrange(z_embed, 'b nf nv c -> b nf (nv c)')
+        z_embed = rearrange(z_embed, 'b nd nf nv c -> b nd nf (nv c)')
 
         face_coor_x = self.mlp_model(x_embed)
         face_coor_y = self.mlp_model(y_embed)
@@ -306,6 +358,11 @@ class AutoEncoder(nn.Module):
         #print("point_feature_shape: ",point_feature.shape)
 
         pro_point_feature = self.process_point_feature(point_feature)
+
+        return face_coor_embed , pro_point_feature # [b,nd,nf,dim] , [b,257,dim]
+
+        '''
+
         context_length = pro_point_feature.shape[1]
         mask1 = mask.unsqueeze(-1).expand(-1, -1, context_length)
         
@@ -327,31 +384,51 @@ class AutoEncoder(nn.Module):
 
         return x
 
-    def decode(self, noise, context , mask):
-        x = context
-        y = noise
-
-        mask = mask.to(self.device)
+        '''
+    def decode(self, face_coor, context, mask):
+        x = context  # [b, 257, dim]
+        mask = mask.to(self.device)  # [b, num of downsample, nf]
         
-        print("context_shape: ",x.shape)
-        print("noise_shape: ",y.shape)
-        context_length = x.shape[1]
-        mask1 = mask.unsqueeze(-1).expand(-1, -1, context_length)
+        batch_size, num_of_downsample, nf, dim = face_coor.shape
+        context_length = x.shape[1]  # 257
+        
+        # Expand mask to match the context length
+        mask1 = mask.unsqueeze(-1).expand(-1, -1, -1, context_length)  # [b, num of downsample, nf, 257]
+
+        # Initialize output tensor
+        output = torch.zeros_like(face_coor)  # [b, num of downsample, nf, dim]
 
         for self_attn, self_ff in self.layers:
             x = self_attn(x, mask=mask1) + x
             x = self_ff(x) + x
-            x = x * mask.unsqueeze(-1) 
 
-        y = self.decoder_cross_attn(y, context=x, mask=mask1) + y
-        if exists(self.decoder_ff):
-            y = y + self.decoder_ff(y)
-            y = y * mask.unsqueeze(-1)
+        # Cross attention and feed-forward layers
+        cross_attn, cross_ff = self.cross_attend_blocks
+
+        for i in range(num_of_downsample):
+            # Apply self-attention and feed-forward layers for the context
+
+            mask1_i = mask1[:, i, :, :]  # Select mask for the current downsample level 
+            yi = face_coor[:, i, :, :]  # [b, nf, dim] for the current downsample level
+            yi = cross_attn(yi, context=x, mask=mask1_i) + yi  # Apply cross-attention
+            yi = cross_ff(yi) + yi  # Apply feed-forward network
+            yi = yi * mask[:, i, :].unsqueeze(-1)  # Apply mask
+            
+            # Store the result for the current downsample level
+            output[:, i, :, :] = yi
+
+        res = self.recon3(output)
+
+        return res  # [b, num of downsample, nf, dim]
+
+    def forward(self, pc_list, mesh_list, facecood_list , mask):
         
-        print("y_shape: ",y.shape)
+        x,y = self.encode(pc_list, mesh_list,facecood_list , mask)
 
-        return self.to_outputs(y)
-    
+        o = self.decode(x, y, mask)
+
+        return {'logits': o}
+    '''
     def forward(self, pc_list, mesh_list, facecood_list , mask ,noise = None):
         
         x = self.encode(pc_list, mesh_list,facecood_list , mask)
@@ -362,6 +439,7 @@ class AutoEncoder(nn.Module):
         o = self.decode(noise, context=x,mask = mask)
 
         return {'logits': o}
+    '''
     
     def recon(self, latents):
 
@@ -395,4 +473,68 @@ class AutoEncoder(nn.Module):
         triangles = projected_logits.view(batch_size, num_faces, 3, 3)
 
         return triangles
-    
+
+    def recon3(self, latents):
+        """
+        latents: tensor of shape (b, nd, nf, dim)
+        
+        Returns a tensor of shape (b, nd, nf, 3, 3) representing the triangles.
+        """ 
+        batch_size, num_downsample, num_faces, dim = latents.shape  # Handle 4D latents
+
+        # Apply MLP model on the 4D tensor
+        projected_logits = self.mlp_model2(latents)  # Keep the shape [b, nd, nf, 9]
+
+        # Reshape the projected logits into the desired shape [b, nd, nf, 3, 3]
+        triangles = projected_logits.view(batch_size, num_downsample, num_faces, 3, 3)
+
+        return triangles
+
+
+    '''
+    def decode(self, face_coor, context , mask):
+        x = context
+        y = face_coor
+        mask = mask.to(self.device)
+
+        context_length = x.shape[1]
+        mask1 = mask.unsqueeze(-1).expand(-1, -1, context_length)
+
+        for self_attn, self_ff in self.layers:
+            x = self_attn(x, mask=mask1) + x
+            x = self_ff(x) + x
+
+        cross_attn, cross_ff = self.cross_attend_blocks
+        
+        y = cross_attn(y, context=x, mask = mask1) + y   # b nf dim
+
+        y = cross_ff(y) + y
+
+        y = y * mask.unsqueeze(-1)
+
+        return y
+    def decode(self, noise, context , mask):
+        x = context
+        y = noise
+
+        mask = mask.to(self.device)
+        
+        print("context_shape: ",x.shape)
+        print("noise_shape: ",y.shape)
+        context_length = x.shape[1]
+        mask1 = mask.unsqueeze(-1).expand(-1, -1, context_length)
+
+        for self_attn, self_ff in self.layers:
+            x = self_attn(x, mask=mask1) + x
+            x = self_ff(x) + x
+            x = x * mask.unsqueeze(-1) 
+
+        y = self.decoder_cross_attn(y, context=x, mask=mask1) + y
+        if exists(self.decoder_ff):
+            y = y + self.decoder_ff(y)
+            y = y * mask.unsqueeze(-1)
+        
+        print("y_shape: ",y.shape)
+
+        return self.to_outputs(y)
+    '''  
