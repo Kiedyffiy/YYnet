@@ -4,6 +4,7 @@ import skimage.measure
 import trimesh
 import os
 import torch
+from collections import OrderedDict
 
 # 加载ShapeNet模型
 def load_shapenet_model(file_path):
@@ -51,6 +52,97 @@ def export_to_watertight(normalized_mesh, octree_depth: int = 7):
     #face_coord = torch.tensor(vertices[faces], dtype=torch.float32)  # 'nf nvf c'
     #print("face_coord_shape: ",face_coord.shape)
     return mesh  #, face_coord
+
+def sort_vertices_by_zyx(vertices):
+    """按照 z-y-x 顺序对顶点进行排序"""
+    return vertices[:, 2], vertices[:, 1], vertices[:, 0]  # z, y, x
+
+def cyclic_permute(face):
+    """将 face 中的顶点进行环形重排，使得最小的索引在第一个位置"""
+    min_idx = torch.argmin(face, dim=0)  # 找到最小顶点的索引
+    return torch.roll(face, shifts=-min_idx[0].item(), dims=0)  # 根据最小索引进行环形重排
+
+def reorder_faces(vertices, faces):
+    """
+    按照 MeshGPT 的方法，对顶点和面片进行排序。
+    vertices: 顶点坐标张量，形状为 [num_vertices, 3]，其中 3 表示 (x, y, z) 坐标。
+    faces: 面片张量，形状为 [num_faces, 3]，其中 3 表示顶点索引。
+    """
+    
+    # 去重顶点并按 z-y-x 顺序排序
+    seen = OrderedDict()
+    for point in vertices:
+        key = tuple(point.tolist())
+        if key not in seen:
+            seen[key] = point
+    
+    unique_vertices = list(seen.values())
+    sorted_vertices = sorted(unique_vertices, key=sort_vertices_by_zyx)
+    
+    # 创建顶点映射
+    vertices_as_tuples = [tuple(v.tolist()) for v in vertices]
+    sorted_vertices_as_tuples = [tuple(v.tolist()) for v in sorted_vertices]
+    
+    vertex_map = {old_index: new_index for old_index, vertex_tuple in enumerate(vertices_as_tuples)
+                  for new_index, sorted_vertex_tuple in enumerate(sorted_vertices_as_tuples)
+                  if vertex_tuple == sorted_vertex_tuple}
+    
+    # 根据新顶点索引重排面片
+    reindexed_faces = torch.tensor([[vertex_map[face[0].item()], vertex_map[face[1].item()], vertex_map[face[2].item()]] for face in faces])
+    
+    # 对每个面片内部的顶点进行排序
+    reindexed_faces = torch.stack([cyclic_permute(face) for face in reindexed_faces])
+    
+    # 按最低顶点的索引顺序排列面片
+    sorted_faces = reindexed_faces[torch.argsort(reindexed_faces[:, 0])]
+    
+    return torch.stack(sorted_vertices), sorted_faces
+
+def sort_mesh_with_mask(tensor, mask):
+    """
+    对 batchsize, downsampletimes, face, vertices, coords 的 tensor 进行排序，仅排序有效面片。
+    tensor: 形状为 [batchsize, num_of_downsampletimes, num_faces, num_vertices_per_face (3), coords (3)]
+    mask: 有效面片的 mask，形状为 [batchsize, num_of_downsampletimes, max_nf]，有效面片为 True。
+    
+    返回: 排序后的 tensor。
+    """
+    batchsize, nd, nf, nvf, c = tensor.shape
+    sorted_tensors = []
+    
+    for b in range(batchsize):
+        downsampled_tensors = []
+        for i in range(nd):
+            face_coords = tensor[b, i]  # 获取当前 downsample 的 face 坐标
+            current_mask = mask[b, i]   # 获取当前 downsample 对应的 mask
+            
+            # 获取有效面片的索引（mask 为 True 的部分）
+            valid_indices = torch.nonzero(current_mask, as_tuple=False).squeeze(1)
+            
+            if valid_indices.numel() == 0:  # 如果没有有效的面片，直接跳过
+                downsampled_tensors.append(face_coords)
+                continue
+
+            # 只对有效的面片进行排序
+            valid_face_coords = face_coords[valid_indices]
+            vertices = valid_face_coords.reshape(-1, c)  # 把有效顶点展开成 [num_vertices, coords] 形状
+            faces = torch.arange(vertices.shape[0]).reshape(len(valid_indices), nvf)  # 生成对应的 face 索引
+            
+            # 排序有效面片
+            sorted_vertices, sorted_faces = reorder_faces(vertices, faces)
+            
+            # 根据重新排序的面片顺序，重建 face_coords
+            sorted_face_coords = sorted_vertices[sorted_faces].reshape(len(valid_indices), nvf, c)
+            
+            # 将排序后的面片填回到 face_coords 中，无效的面片保持不变
+            sorted_full_face_coords = face_coords.clone()
+            sorted_full_face_coords[valid_indices] = sorted_face_coords
+            
+            downsampled_tensors.append(sorted_full_face_coords)
+        
+        sorted_tensors.append(torch.stack(downsampled_tensors, dim=0))
+    
+    return torch.stack(sorted_tensors, dim=0)
+
 
 def pad_face_coords_sample(all_face_coods):
     """
@@ -235,7 +327,7 @@ def pad_face_coord_list(face_coord_list):
             padded_face_coord[i, j, :nf] = face_coord_tensor
             mask[i, j, :nf] = True  # 仅标记有效的face部分
 
-    return padded_face_coord, mask
+    return sort_mesh_with_mask(padded_face_coord,mask), mask
 
 # 处理ShapeNet模型并生成点云
 # todo 适应数据结构
@@ -262,3 +354,80 @@ def process_shapenet_models(data_dir,k = 800, marching_cubes=False, sample_num=4
     return pc_normal_list, return_mesh_list, padded_face_coord, mask
 
 
+
+
+
+'''
+def sort_vertices_by_zyx(vertices):
+    """按照 z-y-x 顺序对顶点进行排序"""
+    return vertices[:, 2], vertices[:, 1], vertices[:, 0]  # z, y, x
+
+def cyclic_permute(face):
+    """将 face 中的顶点进行环形重排，使得最小的索引在第一个位置"""
+    min_idx = torch.argmin(face, dim=0)  # 找到最小顶点的索引
+    return torch.roll(face, shifts=-min_idx[0].item(), dims=0)  # 根据最小索引进行环形重排
+
+def reorder_faces(vertices, faces):
+    """
+    按照 MeshGPT 的方法，对顶点和面片进行排序。
+    vertices: 顶点坐标张量，形状为 [num_vertices, 3]，其中 3 表示 (x, y, z) 坐标。
+    faces: 面片张量，形状为 [num_faces, 3]，其中 3 表示顶点索引。
+    """
+    
+    # 去重顶点并按 z-y-x 顺序排序
+    seen = OrderedDict()
+    for point in vertices:
+        key = tuple(point.tolist())
+        if key not in seen:
+            seen[key] = point
+    
+    unique_vertices = list(seen.values())
+    sorted_vertices = sorted(unique_vertices, key=sort_vertices_by_zyx)
+    
+    # 创建顶点映射
+    vertices_as_tuples = [tuple(v.tolist()) for v in vertices]
+    sorted_vertices_as_tuples = [tuple(v.tolist()) for v in sorted_vertices]
+    
+    vertex_map = {old_index: new_index for old_index, vertex_tuple in enumerate(vertices_as_tuples)
+                  for new_index, sorted_vertex_tuple in enumerate(sorted_vertices_as_tuples)
+                  if vertex_tuple == sorted_vertex_tuple}
+    
+    # 根据新顶点索引重排面片
+    reindexed_faces = torch.tensor([[vertex_map[face[0].item()], vertex_map[face[1].item()], vertex_map[face[2].item()]] for face in faces])
+    
+    # 对每个面片内部的顶点进行排序
+    reindexed_faces = torch.stack([cyclic_permute(face) for face in reindexed_faces])
+    
+    # 按最低顶点的索引顺序排列面片
+    sorted_faces = reindexed_faces[torch.argsort(reindexed_faces[:, 0])]
+    
+    return torch.stack(sorted_vertices), sorted_faces
+
+def sort_mesh_recon(tensor):  #To do Mask
+    """
+    对 batchsize, downsampletimes, face, vertices, coords 的 tensor 进行排序。
+    tensor: 形状为 [batchsize, num_of_downsampletimes, num_faces, num_vertices_per_face (3), coords (3)]
+    
+    返回: 排序后的 tensor。
+    """
+    batchsize, nd, nf, nvf, c = tensor.shape
+    sorted_tensors = []
+    
+    for b in range(batchsize):
+        downsampled_tensors = []
+        for i in range(nd):
+            face_coords = tensor[b, i]  # 获取当前 downsample 的 face 坐标
+            vertices = face_coords.reshape(-1, c)  # 把顶点展开成 [num_vertices, coords] 形状
+            faces = torch.arange(vertices.shape[0]).reshape(nf, nvf)  # 生成对应的 face 索引
+
+            sorted_vertices, sorted_faces = reorder_faces(vertices, faces)
+
+            # 根据重新排序的面片顺序，重建 face_coords
+            sorted_face_coords = sorted_vertices[sorted_faces].reshape(nf, nvf, c)
+            downsampled_tensors.append(sorted_face_coords)
+        
+        sorted_tensors.append(torch.stack(downsampled_tensors, dim=0))
+    
+    return torch.stack(sorted_tensors, dim=0)
+
+'''

@@ -14,6 +14,7 @@ from timm.models.layers import DropPath
 
 from mesh_to_pc import (
     process_mesh_to_pc,
+    sort_mesh_with_mask,
 
 )
 
@@ -191,58 +192,6 @@ class Attention(nn.Module):
         out = rearrange(out, '(b h) n d -> b n (h d)', h = h)
         return self.drop_path(self.to_out(out))
 
-def sort_faces_by_vertex_index(face_coor):
-    """
-    Sorts faces based on the vertex indices in ascending order.
-    
-    Parameters:
-    - face_coor: Tensor, shape [batch, num_faces, 3, 3] (batch, num of face, num of vertices per face (3), coords (xyz))
-    
-    Returns:
-    - sorted_face_coor: Tensor, sorted faces according to the vertex indices.
-    """
-    batch_size, num_faces, num_vertices, _ = face_coor.shape
-
-    # Step 1: Flatten the face coordinates and sort them based on the vertex indices
-    face_coor_flat = face_coor.view(batch_size, num_faces, -1)  # [batch, num_faces, 9]
-    min_vertex_indices = torch.argmin(face_coor_flat, dim=-1)  # [batch, num_faces], indices of the min vertex in each face
-
-    # Step 2: Gather the sorted faces using the indices
-    sorted_face_indices = torch.argsort(min_vertex_indices, dim=-1)  # [batch, num_faces]
-    sorted_face_coor = face_coor_flat.gather(1, sorted_face_indices.unsqueeze(-1).expand(-1, -1, 9)).view(batch_size, num_faces, num_vertices, 3)
-
-    return sorted_face_coor
-
-def sort_faces_by_vertex_coordinate(face_coor):
-    """
-    Sorts faces based on the vertex coordinates in a specific order (y, z, x).
-    
-    Parameters:
-    - face_coor: Tensor, shape [batch, num_faces, 3, 3] (batch, num of face, num of vertices per face (3), coords (xyz))
-    
-    Returns:
-    - sorted_face_coor: Tensor, sorted faces according to the vertex coordinates.
-    """
-    batch_size, num_faces, num_vertices, coord_dims = face_coor.shape
-
-    # Step 1: Flatten the face coordinates
-    face_coor_flat = face_coor.view(batch_size, num_faces, -1)  # [batch, num_faces, 9]
-
-    # Step 2: Sort the vertices within each face based on their coordinates
-    def sort_vertices(vertex):
-        return vertex[:, 1], vertex[:, 2], vertex[:, 0]  # Sort by y, then z, then x
-
-    sorted_vertices = torch.zeros_like(face_coor_flat)
-    for i in range(batch_size):
-        for j in range(num_faces):
-            vertices = face_coor_flat[i, j]  # Get the vertices of the current face
-            sorted_vertices[i, j] = torch.tensor(sorted(vertices.tolist(), key=lambda x: sort_vertices(np.array(x))))
-
-    # Step 3: Reshape back to the original face coordinate shape
-    sorted_face_coor = sorted_vertices.view(batch_size, num_faces, num_vertices, coord_dims)
-
-    return sorted_face_coor
-
 class AutoEncoder(nn.Module):
     def __init__(
         self,
@@ -418,6 +367,8 @@ class AutoEncoder(nn.Module):
             output[:, i, :, :] = yi
 
         res = self.recon3(output)
+
+        res = sort_mesh_with_mask(res)
 
         return res  # [b, num of downsample, nf, dim]
 
