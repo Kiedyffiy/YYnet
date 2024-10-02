@@ -53,7 +53,20 @@ class AutoTrainer(nn.Module):
 
     def forward(self, pc_list, mesh_list, face_coords, mask, noise=None):
         return self.model(pc_list, mesh_list, face_coords, mask, noise)
+    
+    def compute_masked_loss(self, pred_triangles, target_triangles, mask):
+        batch_size, num_downsample, max_nf, _, _ = pred_triangles.shape
 
+        # 将 pred_triangles 中的无效面填充为 0
+        pred_triangles_masked = pred_triangles.clone()  # 复制一份以避免修改原始数据
+        pred_triangles_masked[~mask] = 0  # 将无效面填充为 0
+
+        # 计算损失
+        loss = self.criterion(pred_triangles_masked, target_triangles)
+
+        return loss / batch_size
+    
+    '''
     def compute_set_loss(self, pred_triangles, target_triangles):  # Hungarian
         batch_size, num_faces, num_vertices, _ = pred_triangles.shape
         total_loss = 0
@@ -75,16 +88,17 @@ class AutoTrainer(nn.Module):
             total_loss += loss
 
         return total_loss / batch_size
-
+    '''
     def train_step(self, batch):
         pc_list, mesh_list, face_coords, mask = batch
         self.optimizer.zero_grad()
 
         output = self.forward(pc_list, mesh_list, face_coords, mask)
-        pred_triangles = self.model.recon2(output['logits'])
+        pred_triangles = output['logits']
+        #pred_triangles = self.model.recon2(output['logits'])
 
         # 计算set loss
-        loss = self.compute_set_loss(pred_triangles, face_coords)
+        loss = self.compute_set_loss(pred_triangles, face_coords, mask)
         self.accelerator.backward(loss)  # 使用accelerator处理反向传播
 
         self.optimizer.step()

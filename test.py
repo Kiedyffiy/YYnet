@@ -35,10 +35,10 @@ from autotrainer import AutoTrainer
 #shapenet_data_dir = '/root/src/MeshAnything-main/examples' 
 
 shapenet_data_dir = '/root/src/trypc/traint'
-pkl_file_path =  '/root/src/trypc/traint/20240920_191302/dataset.pkl'
+#pkl_file_path =  '/root/src/trypc/traint/20240920_191302/dataset.pkl'
 
-dataset = GLBDataset.load_dataset(pkl_file_path)
-#dataset = GLBDataset(datapath = shapenet_data_dir , k = 500 , save_path = shapenet_data_dir)
+#dataset = GLBDataset.load_dataset(pkl_file_path)
+dataset = GLBDataset(datapath = shapenet_data_dir , k = 500 , save_path = shapenet_data_dir)
 
 #pc_normal_list, return_mesh_list, face_coods, mask = process_shapenet_models(shapenet_data_dir, marching_cubes=True, sample_num=4096)
 

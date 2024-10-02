@@ -53,14 +53,14 @@ def export_to_watertight(normalized_mesh, octree_depth: int = 7):
     #print("face_coord_shape: ",face_coord.shape)
     return mesh  #, face_coord
 
-def sort_vertices_by_zyx(vertices):
-    """按照 z-y-x 顺序对顶点进行排序"""
-    return vertices[:, 2], vertices[:, 1], vertices[:, 0]  # z, y, x
+def sort_vertices_by_zyx(vertex):
+    """按照 z-y-x 顺序对单个顶点进行排序"""
+    return vertex[2], vertex[1], vertex[0]  # z, y, x
 
 def cyclic_permute(face):
     """将 face 中的顶点进行环形重排，使得最小的索引在第一个位置"""
     min_idx = torch.argmin(face, dim=0)  # 找到最小顶点的索引
-    return torch.roll(face, shifts=-min_idx[0].item(), dims=0)  # 根据最小索引进行环形重排
+    return torch.roll(face, shifts=-min_idx.item(), dims=0)  # 根据最小索引进行环形重排
 
 def reorder_faces(vertices, faces):
     """
@@ -74,9 +74,13 @@ def reorder_faces(vertices, faces):
     for point in vertices:
         key = tuple(point.tolist())
         if key not in seen:
+            #print(key,"first appear!")
             seen[key] = point
+
     
     unique_vertices = list(seen.values())
+    #print("unique_vertices.shape: ",len(unique_vertices))
+    #print(unique_vertices)
     sorted_vertices = sorted(unique_vertices, key=sort_vertices_by_zyx)
     
     # 创建顶点映射
@@ -89,7 +93,7 @@ def reorder_faces(vertices, faces):
     
     # 根据新顶点索引重排面片
     reindexed_faces = torch.tensor([[vertex_map[face[0].item()], vertex_map[face[1].item()], vertex_map[face[2].item()]] for face in faces])
-    
+    print("reindexed_faces: ",reindexed_faces.shape)
     # 对每个面片内部的顶点进行排序
     reindexed_faces = torch.stack([cyclic_permute(face) for face in reindexed_faces])
     
@@ -106,6 +110,8 @@ def sort_mesh_with_mask(tensor, mask):
     
     返回: 排序后的 tensor。
     """
+    print("tensor.shape: ",tensor.shape)
+    print("mask.shape: ",mask.shape)
     batchsize, nd, nf, nvf, c = tensor.shape
     sorted_tensors = []
     
@@ -125,8 +131,9 @@ def sort_mesh_with_mask(tensor, mask):
             # 只对有效的面片进行排序
             valid_face_coords = face_coords[valid_indices]
             vertices = valid_face_coords.reshape(-1, c)  # 把有效顶点展开成 [num_vertices, coords] 形状
+            print("vertices.shape: ",vertices.shape)
             faces = torch.arange(vertices.shape[0]).reshape(len(valid_indices), nvf)  # 生成对应的 face 索引
-            
+            print("faces.shape: ",faces.shape)
             # 排序有效面片
             sorted_vertices, sorted_faces = reorder_faces(vertices, faces)
             
@@ -197,7 +204,9 @@ def get_facecood(mesh, normalize=True):
 
 def simplify_mesh(mesh, target_faces):
     """简化 mesh 并返回降采样后的 face_coord"""
+    #print("target_faces: ",target_faces)
     simplified_mesh = mesh.simplify_quadric_decimation(target_faces) #simplify_quadric_decimation
+    #print(simplified_mesh.faces.shape)
     face_coord = get_facecood(simplified_mesh)
     return face_coord
 
@@ -214,20 +223,26 @@ def process_mesh_to_pc(mesh_list, marching_cubes=False, sample_num=4096 ,decreme
 
         # 检查是否需要进行 marching cubes 操作
         if marching_cubes:
-            mesh = export_to_watertight(mesh)
+            mesh2 = export_to_watertight(mesh)
             print("MC over!")
-        return_mesh_list.append(mesh)
+            return_mesh_list.append(mesh2)
+        else:
+            mesh2 = mesh
+            return_mesh_list.append(mesh2)
+        
 
         
         num_faces = len(mesh.faces)
         # 获取逐次降采样的版本（从 100% 到 50%，每次减少 5%）
         #decrement = 0.05  # 每次减少5%
         current_faces = num_faces
-
-        while current_faces > num_faces * stoppercent:
-            current_faces = int(current_faces * (1 - decrement))
+        times = (1 - stoppercent)/decrement
+        turns = 0
+        while turns < times:
+            current_faces = int(current_faces - num_faces * decrement)
             downsampled_face_coord = simplify_mesh(mesh, current_faces)
             all_face_coods.append(downsampled_face_coord)
+            turns += 1  
 
         '''
         # 获取降采样的版本（面数减半和减少到四分之一）
@@ -245,11 +260,12 @@ def process_mesh_to_pc(mesh_list, marching_cubes=False, sample_num=4096 ,decreme
         # 拼接成新 tensor，形状为 [降采样数量，面片数量，每个面顶点数，顶点坐标]
         #combined_face_coord = torch.stack(all_face_coods, dim=0)  #[num of downsampletimes，num of face，num of vertice，coord]
         #combined_face_coord = np.stack(all_face_coods, axis=0)
+        #print("all_face_coods.len: ",len(all_face_coods))
         face_cood_list.append(all_face_coods)
 
         # 采样点云并计算法向量
-        points, face_idx = mesh.sample(sample_num, return_index=True)
-        normals = mesh.face_normals[face_idx]
+        points, face_idx = mesh2.sample(sample_num, return_index=True)
+        normals = mesh2.face_normals[face_idx]
         pc_normal = np.concatenate([points, normals], axis=-1, dtype=np.float16)
         pc_normal_list.append(pc_normal)
 
@@ -313,7 +329,8 @@ def pad_face_coord_list(face_coord_list):
     num_of_downsampletimes = max(len(downsampled_list) for downsampled_list in face_coord_list)
     max_nf = max(max(face_coord.shape[0] for face_coord in downsampled_list) for downsampled_list in face_coord_list)
     nvf, c = face_coord_list[0][0].shape[1], face_coord_list[0][0].shape[2]  # nvf 和 c 是相同的
-
+    #print("num_of_downsampletimes: ",num_of_downsampletimes)
+    #print("max_nf: ",max_nf)
     # 初始化填充后的tensor和mask
     batch_size = len(face_coord_list)
     padded_face_coord = torch.zeros((batch_size, num_of_downsampletimes, max_nf, nvf, c), dtype=torch.float32)
@@ -347,7 +364,7 @@ def process_shapenet_models(data_dir,k = 800, marching_cubes=False, sample_num=4
 
                 mesh_list.append(mesh)
     
-    pc_normal_list, return_mesh_list,face_cood_list = process_mesh_to_pc(mesh_list, marching_cubes, sample_num)
+    pc_normal_list, return_mesh_list,face_cood_list = process_mesh_to_pc(mesh_list, marching_cubes = marching_cubes, sample_num = sample_num)
 
     padded_face_coord, mask = pad_face_coord_list(face_cood_list)
 

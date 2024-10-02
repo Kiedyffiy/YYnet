@@ -368,9 +368,9 @@ class AutoEncoder(nn.Module):
 
         res = self.recon3(output)
 
-        res = sort_mesh_with_mask(res)
+        res = sort_mesh_with_mask(res , mask)
 
-        return res  # [b, num of downsample, nf, dim]
+        return res  # [b, num of downsample, nf, 3 , 3]
 
     def forward(self, pc_list, mesh_list, facecood_list , mask):
         
