@@ -93,7 +93,7 @@ def reorder_faces(vertices, faces):
     
     # 根据新顶点索引重排面片
     reindexed_faces = torch.tensor([[vertex_map[face[0].item()], vertex_map[face[1].item()], vertex_map[face[2].item()]] for face in faces])
-    print("reindexed_faces: ",reindexed_faces.shape)
+    #print("reindexed_faces: ",reindexed_faces.shape)
     # 对每个面片内部的顶点进行排序
     reindexed_faces = torch.stack([cyclic_permute(face) for face in reindexed_faces])
     
@@ -110,8 +110,8 @@ def sort_mesh_with_mask(tensor, mask):
     
     返回: 排序后的 tensor。
     """
-    print("tensor.shape: ",tensor.shape)
-    print("mask.shape: ",mask.shape)
+    #print("tensor.shape: ",tensor.shape)
+    #print("mask.shape: ",mask.shape)
     batchsize, nd, nf, nvf, c = tensor.shape
     sorted_tensors = []
     
@@ -131,9 +131,9 @@ def sort_mesh_with_mask(tensor, mask):
             # 只对有效的面片进行排序
             valid_face_coords = face_coords[valid_indices]
             vertices = valid_face_coords.reshape(-1, c)  # 把有效顶点展开成 [num_vertices, coords] 形状
-            print("vertices.shape: ",vertices.shape)
+            #print("vertices.shape: ",vertices.shape)
             faces = torch.arange(vertices.shape[0]).reshape(len(valid_indices), nvf)  # 生成对应的 face 索引
-            print("faces.shape: ",faces.shape)
+            #print("faces.shape: ",faces.shape)
             # 排序有效面片
             sorted_vertices, sorted_faces = reorder_faces(vertices, faces)
             

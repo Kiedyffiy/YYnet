@@ -52,7 +52,7 @@ class AutoTrainer(nn.Module):
         self.model.load_state_dict(torch.load(path))
 
     def forward(self, pc_list, mesh_list, face_coords, mask, noise=None):
-        return self.model(pc_list, mesh_list, face_coords, mask, noise)
+        return self.model(pc_list, mesh_list, face_coords, mask)
     
     def compute_masked_loss(self, pred_triangles, target_triangles, mask):
         batch_size, num_downsample, max_nf, _, _ = pred_triangles.shape
@@ -65,6 +65,34 @@ class AutoTrainer(nn.Module):
         loss = self.criterion(pred_triangles_masked, target_triangles)
 
         return loss / batch_size
+
+    def train_step(self, batch):
+        pc_list, mesh_list, face_coords, mask = batch
+        self.optimizer.zero_grad()
+
+        output = self.forward(pc_list, mesh_list, face_coords, mask)
+        pred_triangles = output['logits']
+        #pred_triangles = self.model.recon2(output['logits'])
+
+        # 计算set loss
+        loss = self.compute_masked_loss(pred_triangles, face_coords, mask)
+        self.accelerator.backward(loss)  # 使用accelerator处理反向传播
+
+        self.optimizer.step()
+
+        return loss.item()
+
+    def train(self):
+        for epoch in tqdm(range(self.epochs), disable=not self.accelerator.is_local_main_process):
+            epoch_loss = 0.0
+            progress_bar = tqdm(self.dataloader, desc=f"Epoch [{epoch+1}/{self.epochs}]", disable=not self.accelerator.is_local_main_process)
+
+            for batch in progress_bar:
+                loss = self.train_step(batch)
+                epoch_loss += loss
+                progress_bar.set_postfix({'Loss': epoch_loss / len(self.dataloader)})
+
+            print(f'Epoch [{epoch+1}/{self.epochs}], Loss: {epoch_loss/len(self.dataloader):.4f}')
     
     '''
     def compute_set_loss(self, pred_triangles, target_triangles):  # Hungarian
@@ -89,30 +117,3 @@ class AutoTrainer(nn.Module):
 
         return total_loss / batch_size
     '''
-    def train_step(self, batch):
-        pc_list, mesh_list, face_coords, mask = batch
-        self.optimizer.zero_grad()
-
-        output = self.forward(pc_list, mesh_list, face_coords, mask)
-        pred_triangles = output['logits']
-        #pred_triangles = self.model.recon2(output['logits'])
-
-        # 计算set loss
-        loss = self.compute_set_loss(pred_triangles, face_coords, mask)
-        self.accelerator.backward(loss)  # 使用accelerator处理反向传播
-
-        self.optimizer.step()
-
-        return loss.item()
-
-    def train(self):
-        for epoch in tqdm(range(self.epochs), disable=not self.accelerator.is_local_main_process):
-            epoch_loss = 0.0
-            progress_bar = tqdm(self.dataloader, desc=f"Epoch [{epoch+1}/{self.epochs}]", disable=not self.accelerator.is_local_main_process)
-
-            for batch in progress_bar:
-                loss = self.train_step(batch)
-                epoch_loss += loss
-                progress_bar.set_postfix({'Loss': epoch_loss / len(self.dataloader)})
-
-            print(f'Epoch [{epoch+1}/{self.epochs}], Loss: {epoch_loss/len(self.dataloader):.4f}')

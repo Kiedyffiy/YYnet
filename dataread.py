@@ -5,6 +5,7 @@ from mesh_to_pc import process_shapenet_models
 import pickle
 from datetime import datetime
 import open3d as o3d
+import trimesh
 
 class GLBDataset(Dataset):
     def __init__(self, datapath, k = 800 , marching_cubes=True, sample_num=4096, save_path=None):
@@ -23,6 +24,7 @@ class GLBDataset(Dataset):
     def __getitem__(self, idx):
         pc_normal = self.pc_normal_list[idx]
         mesh = self.return_mesh_list[idx].vertices
+        #print(mesh.shape)
         face_coord = self.face_coods[idx]
         mask = self.mask[idx]
 
@@ -40,10 +42,11 @@ class GLBDataset(Dataset):
         file_path = os.path.join(save_dir, 'dataset.pkl')
         mesh_info_list = []
         for mesh in self.return_mesh_list:
-            if isinstance(mesh, o3d.geometry.TriangleMesh):
-                mesh_info = mesh.dump()  # 使用Open3D的dump方法
+            if isinstance(mesh, trimesh.Trimesh):
+                mesh_info = mesh.to_dict()  # 使用trimesh的to_dict方法转换为可序列化的字典
                 mesh_info_list.append(mesh_info)
             else:
+                print("wrong mesh ob!")
                 # 处理其他类型的mesh对象
                 pass        
 
@@ -58,6 +61,12 @@ class GLBDataset(Dataset):
     
         print(f"Dataset saved to {file_path}")
 
+    def info(self):
+        print("self.pc_normal_list len: ",len(self.pc_normal_list))
+        print("self.return_mesh_list len: ",len(self.return_mesh_list))
+        print("self.face_coods shape: ",self.face_coods.shape)
+        print("self.mask shape: ",self.mask.shape)
+
     @staticmethod
     def load_dataset(load_path):
         # 从pickle文件加载数据集
@@ -65,7 +74,12 @@ class GLBDataset(Dataset):
             data = pickle.load(f)
         dataset = GLBDataset.__new__(GLBDataset)  # 使用__new__方法创建实例
         dataset.pc_normal_list = data['pc_normal_list']
-        dataset.return_mesh_list = [o3d.geometry.TriangleMesh.load(mesh_info) for mesh_info in data['return_mesh_list']]
+        #dataset.return_mesh_list = [o3d.geometry.TriangleMesh.load(mesh_info) for mesh_info in data['return_mesh_list']]
+        dataset.return_mesh_list = [trimesh.Trimesh(**mesh_info) for mesh_info in data['return_mesh_list']]
         dataset.face_coods = data['face_coods']
         dataset.mask = data['mask']
+        
         return dataset
+    
+
+

@@ -284,13 +284,37 @@ class AutoEncoder(nn.Module):
         face_coor_embed = torch.cat((face_coor_x, face_coor_y, face_coor_z), dim=-1)
 
         normalized_pc_normal_list = []
-        for pc_normal, mesh in zip(pc_list, mesh_list):
-            vertices = mesh.numpy()
+        for pc_normal, vertices1 in zip(pc_list, mesh_list):
+            vertices = vertices1
+            #print(vertices.shape)
+            pc_coor = pc_normal[:, :3]
+            normals = pc_normal[:, 3:]
+
+            bounds_min, _ = torch.min(vertices, dim=0)
+            bounds_max, _ = torch.max(vertices, dim=0)
+            bounds = torch.stack([bounds_min, bounds_max])
+            #print(bounds.shape)
+
+            pc_coor = pc_coor - (bounds[0] + bounds[1])[None, :] / 2
+            pc_coor = pc_coor / (bounds[1] - bounds[0]).max()
+            pc_coor = pc_coor / torch.abs(pc_coor).max() * 0.9995  # input should be from -1 to 1
+
+            assert (torch.norm(normals, dim=-1) > 0.99).all(), "normals should be unit vectors, something wrong"
+
+            normalized_pc_normal = torch.cat([pc_coor, normals], dim=-1).to(dtype=torch.float16)
+            normalized_pc_normal_list.append(normalized_pc_normal)
+
+        normalized_pc_normal_array = torch.stack(normalized_pc_normal_list)
+        input_tensor = normalized_pc_normal_array.to(dtype=torch.float16, device=self.device)
+
+        '''
+        for pc_normal, vertices1 in zip(pc_list, mesh_list):
+            vertices = vertices1.cpu().numpy()
             print(vertices.shape)
             pc_coor = pc_normal[:, :3]
             normals = pc_normal[:, 3:]
             bounds = np.array([vertices.min(axis=0), vertices.max(axis=0)])
-            print(bounds.shape)
+            #print(bounds.shape)
             pc_coor = pc_coor - (bounds[0] + bounds[1])[None, :] / 2
             pc_coor = pc_coor / (bounds[1] - bounds[0]).max()
             pc_coor = pc_coor / np.abs(pc_coor).max() * 0.9995  # input should be from -1 to 1
@@ -301,6 +325,7 @@ class AutoEncoder(nn.Module):
         normalized_pc_normal_array = np.array(normalized_pc_normal_list)
 
         input_tensor = torch.tensor(normalized_pc_normal_array, dtype=torch.float16, device = self.device)
+        '''  
 
         point_feature = self.point_encoder.encode_latents(input_tensor)
 
@@ -348,7 +373,7 @@ class AutoEncoder(nn.Module):
         output = torch.zeros_like(face_coor)  # [b, num of downsample, nf, dim]
 
         for self_attn, self_ff in self.layers:
-            x = self_attn(x, mask=mask1) + x
+            x = self_attn(x) + x
             x = self_ff(x) + x
 
         # Cross attention and feed-forward layers
