@@ -34,11 +34,12 @@ from autotrainer import AutoTrainer
 
 #shapenet_data_dir = '/root/src/MeshAnything-main/examples' 
 
-shapenet_data_dir = '/root/src/trypc/traint'
-pkl_file_path =  '/root/src/trypc/traint/20241003_190105/dataset.pkl'
+shapenet_data_dir = '/root/data/ShapeNetCore.v2/03001627'
+save_path1 = '/root/src/trypc/traint'
+#pkl_file_path =  '/root/src/trypc/traint/20241003_190105/dataset.pkl'
 
-dataset = GLBDataset.load_dataset(pkl_file_path)
-#dataset = GLBDataset(datapath = shapenet_data_dir , k = 500 , save_path = shapenet_data_dir)
+#dataset = GLBDataset.load_dataset(pkl_file_path)
+dataset = GLBDataset(datapath = shapenet_data_dir , k = 800 , save_path = save_path1)
 
 #pc_normal_list, return_mesh_list, face_coods, mask = process_shapenet_models(shapenet_data_dir, marching_cubes=True, sample_num=4096)
 
@@ -46,16 +47,6 @@ dataset.info()
 
 print("process_shapenet_finished!")
 
-model = AutoEncoder()
-model.to(model.device)
-
-batch_size = 1
-epochs = 1
-
-trainer = AutoTrainer(model=model, dataset=dataset, batch_size=batch_size, epochs=epochs)
-trainer.train()
-
-print("Training completed successfully!")
 
 '''
 

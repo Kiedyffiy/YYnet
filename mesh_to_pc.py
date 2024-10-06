@@ -5,6 +5,7 @@ import trimesh
 import os
 import torch
 from collections import OrderedDict
+from tqdm import tqdm
 
 # 加载ShapeNet模型
 def load_shapenet_model(file_path):
@@ -115,7 +116,9 @@ def sort_mesh_with_mask(tensor, mask):
     batchsize, nd, nf, nvf, c = tensor.shape
     sorted_tensors = []
     
-    for b in range(batchsize):
+    print("start sort!!")
+
+    for b in tqdm(range(batchsize), desc="Sorting batches"):
         downsampled_tensors = []
         for i in range(nd):
             face_coords = tensor[b, i]  # 获取当前 downsample 的 face 坐标
@@ -147,7 +150,9 @@ def sort_mesh_with_mask(tensor, mask):
             downsampled_tensors.append(sorted_full_face_coords)
         
         sorted_tensors.append(torch.stack(downsampled_tensors, dim=0))
-    
+
+    print("end sort!!")
+
     return torch.stack(sorted_tensors, dim=0)
 
 
@@ -216,7 +221,7 @@ def process_mesh_to_pc(mesh_list, marching_cubes=False, sample_num=4096 ,decreme
     return_mesh_list = []
     face_cood_list = []
 
-    for mesh in mesh_list:
+    for mesh in tqdm(mesh_list, desc="Processing meshes"):
         # 提取原始 face_coord
         original_face_coord = get_facecood(mesh)
         all_face_coods = [original_face_coord]
@@ -224,7 +229,7 @@ def process_mesh_to_pc(mesh_list, marching_cubes=False, sample_num=4096 ,decreme
         # 检查是否需要进行 marching cubes 操作
         if marching_cubes:
             mesh2 = export_to_watertight(mesh)
-            print("MC over!")
+            #print("MC over!")
             return_mesh_list.append(mesh2)
         else:
             mesh2 = mesh
@@ -269,7 +274,7 @@ def process_mesh_to_pc(mesh_list, marching_cubes=False, sample_num=4096 ,decreme
         pc_normal = np.concatenate([points, normals], axis=-1, dtype=np.float16)
         pc_normal_list.append(pc_normal)
 
-        print("Process mesh success")
+        #print("Process mesh success")
 
     return pc_normal_list, return_mesh_list, face_cood_list
 
@@ -326,6 +331,7 @@ def pad_face_coord_list(face_coord_list):
 '''
 def pad_face_coord_list(face_coord_list):
     # 找出最大的降采样次数和最大的nf
+    print("pad_face_coord start!!")
     num_of_downsampletimes = max(len(downsampled_list) for downsampled_list in face_coord_list)
     max_nf = max(max(face_coord.shape[0] for face_coord in downsampled_list) for downsampled_list in face_coord_list)
     nvf, c = face_coord_list[0][0].shape[1], face_coord_list[0][0].shape[2]  # nvf 和 c 是相同的
@@ -344,11 +350,13 @@ def pad_face_coord_list(face_coord_list):
             padded_face_coord[i, j, :nf] = face_coord_tensor
             mask[i, j, :nf] = True  # 仅标记有效的face部分
 
+    print("pad_face_coord finish!!")
+
     return sort_mesh_with_mask(padded_face_coord,mask), mask
 
 # 处理ShapeNet模型并生成点云
 # todo 适应数据结构
-
+'''
 def process_shapenet_models(data_dir,k = 800, marching_cubes=False, sample_num=4096):
     mesh_list = []
     for root, dirs, files in os.walk(data_dir):
@@ -369,9 +377,31 @@ def process_shapenet_models(data_dir,k = 800, marching_cubes=False, sample_num=4
     padded_face_coord, mask = pad_face_coord_list(face_cood_list)
 
     return pc_normal_list, return_mesh_list, padded_face_coord, mask
+'''
 
+def process_shapenet_models(data_dir,k = 800, marching_cubes=False, sample_num=4096):
+    mesh_list = []
+    for model_name in os.listdir(data_dir):
+        model_path = os.path.join(data_dir, model_name, 'models', 'model_normalized.obj')
+        if os.path.exists(model_path):
+            if os.path.getsize(model_path) > 1 * 1024 * 1024:
+                continue
+            try:
+                mesh = load_shapenet_model(model_path)
 
+                if len(mesh.faces) > k:
+                    #print(f"Skipping {file} as it has {len(mesh.faces)} faces, which exceeds the threshold of {k}.")
+                    continue 
+                mesh_list.append(mesh)
+            except Exception as e:
+                print(f'处理模型 {model_path} 时出错: {e}')
+    print("Generate meshlist successfully! len of list : ",len(mesh_list))
 
+    pc_normal_list, return_mesh_list,face_cood_list = process_mesh_to_pc(mesh_list, marching_cubes = marching_cubes, sample_num = sample_num)
+
+    padded_face_coord, mask = pad_face_coord_list(face_cood_list)
+
+    return pc_normal_list, return_mesh_list, padded_face_coord, mask
 
 
 '''
