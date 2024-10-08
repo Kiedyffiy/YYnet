@@ -54,6 +54,33 @@ def export_to_watertight(normalized_mesh, octree_depth: int = 7):
     #print("face_coord_shape: ",face_coord.shape)
     return mesh  #, face_coord
 
+def rebuild_3d_model(face_cood, mask):
+    """
+    通过 face_cood 和 mask 重建 3D 模型
+    :param face_cood: Tensor, 形状为 [max_num_faces, 3 (顶点数), 3 (x, y, z 坐标)]
+    :param mask: Tensor, 形状为 [max_num_faces]，布尔类型，表示有效面片
+    :return: 返回一个 trimesh.Trimesh 对象
+    """
+
+    # 将输入数据转换为 NumPy 数组，以便与 trimesh 兼容
+    face_cood_np = face_cood.cpu().numpy() if isinstance(face_cood, torch.Tensor) else face_cood
+    mask_np = mask.cpu().numpy() if isinstance(mask, torch.Tensor) else mask
+
+    # 根据 mask 选择有效的面片
+    valid_faces = face_cood_np[mask_np]
+
+    # 将有效面片的顶点数据展平成一个顶点列表，并生成对应的面索引
+    vertices = valid_faces.reshape(-1, 3)  # [num_faces * 3, 3]
+    num_faces = valid_faces.shape[0]
+    
+    # 面的索引，每个面有3个顶点
+    faces = np.arange(num_faces * 3).reshape(num_faces, 3)
+
+    # 创建 trimesh 对象
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+
+    return mesh
+
 def sort_vertices_by_zyx(vertex):
     """按照 z-y-x 顺序对单个顶点进行排序"""
     return vertex[2], vertex[1], vertex[0]  # z, y, x
@@ -230,10 +257,10 @@ def process_mesh_to_pc(mesh_list, marching_cubes=False, sample_num=4096 ,decreme
         if marching_cubes:
             mesh2 = export_to_watertight(mesh)
             #print("MC over!")
-            return_mesh_list.append(mesh2)
+            return_mesh_list.append(mesh2.vertices) #减小内存占用
         else:
             mesh2 = mesh
-            return_mesh_list.append(mesh2)
+            return_mesh_list.append(mesh2.vertices) #减小内存占用
         
 
         

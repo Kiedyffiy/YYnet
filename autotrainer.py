@@ -13,7 +13,7 @@ class AutoTrainer(nn.Module):
         self, 
         model: AutoEncoder, 
         dataset, 
-        lr=1e-4, 
+        lr=1e-3, 
         epochs=100, 
         batch_size=8, 
         device = torch.device('cuda'),
@@ -91,8 +91,9 @@ class AutoTrainer(nn.Module):
                 loss = self.train_step(batch)
                 epoch_loss += loss
                 progress_bar.set_postfix({'Loss': epoch_loss / len(self.dataloader)})
-
-            print(f'Epoch [{epoch+1}/{self.epochs}], Loss: {epoch_loss/len(self.dataloader):.4f}')
+            if self.accelerator.is_main_process:
+                print(f'Epoch [{epoch+1}/{self.epochs}], Loss: {epoch_loss/len(self.dataloader):.4f}')
+            #print(f'Epoch [{epoch+1}/{self.epochs}], Loss: {epoch_loss/len(self.dataloader):.4f}')
     
     '''
     def compute_set_loss(self, pred_triangles, target_triangles):  # Hungarian
