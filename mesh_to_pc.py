@@ -6,6 +6,11 @@ import os
 import torch
 from collections import OrderedDict
 from tqdm import tqdm
+from MeshAnything.miche.encode import load_model
+
+
+point_encoder = load_model(ckpt_path=None)
+device = torch.device('cuda')
 
 # 加载ShapeNet模型
 def load_shapenet_model(file_path):
@@ -53,6 +58,40 @@ def export_to_watertight(normalized_mesh, octree_depth: int = 7):
     #face_coord = torch.tensor(vertices[faces], dtype=torch.float32)  # 'nf nvf c'
     #print("face_coord_shape: ",face_coord.shape)
     return mesh  #, face_coord
+
+def calc_feature(pc_list,mesh_list,batch_size=64):
+        normalized_pc_normal_list = []
+        print("start calc feature!")
+        for pc_normal, vertices in tqdm(zip(pc_list, mesh_list), total=len(pc_list), desc="Processing"):
+            #vertices = vertices1
+            #print(vertices.shape)
+            pc_coor = pc_normal[:, :3]
+            normals = pc_normal[:, 3:]
+            bounds = np.array([vertices.min(axis=0), vertices.max(axis=0)])
+            #print(bounds.shape)
+            pc_coor = pc_coor - (bounds[0] + bounds[1])[None, :] / 2
+            pc_coor = pc_coor / (bounds[1] - bounds[0]).max()
+            pc_coor = pc_coor / np.abs(pc_coor).max() * 0.9995  # input should be from -1 to 1
+            assert (np.linalg.norm(normals, axis=-1) > 0.99).all(), "normals should be unit vectors, something wrong"
+            normalized_pc_normal = np.concatenate([pc_coor, normals], axis=-1, dtype=np.float16)
+            normalized_pc_normal_list.append(normalized_pc_normal)
+
+        normalized_pc_normal_array = np.array(normalized_pc_normal_list)
+        # 按批次处理
+        num_batches = (normalized_pc_normal_array.shape[0] + batch_size - 1) // batch_size  # 计算批次数
+        all_point_features = []
+        for i in tqdm(range(num_batches), desc="Encoding Batches"):
+            batch_input = torch.tensor(normalized_pc_normal_array[i * batch_size:(i + 1) * batch_size], dtype=torch.float16, device=device)
+            point_feature_batch = point_encoder.encode_latents(batch_input)
+            all_point_features.append(point_feature_batch)
+
+        # 合并所有批次的输出
+        point_feature = torch.cat(all_point_features, dim=0)
+        #input_tensor = torch.tensor(normalized_pc_normal_array, dtype=torch.float16,device=device)
+        #point_feature = point_encoder.encode_latents(input_tensor)
+        print("end calc feature!")
+        print("point_feature.shape: ",point_feature.shape)
+        return point_feature
 
 def rebuild_3d_model(face_cood, mask):
     """
@@ -143,9 +182,9 @@ def sort_mesh_with_mask(tensor, mask):
     batchsize, nd, nf, nvf, c = tensor.shape
     sorted_tensors = []
     
-    print("start sort!!")
+    #print("start sort!!")
 
-    for b in tqdm(range(batchsize), desc="Sorting batches"):
+    for b in range(batchsize):
         downsampled_tensors = []
         for i in range(nd):
             face_coords = tensor[b, i]  # 获取当前 downsample 的 face 坐标
@@ -178,7 +217,7 @@ def sort_mesh_with_mask(tensor, mask):
         
         sorted_tensors.append(torch.stack(downsampled_tensors, dim=0))
 
-    print("end sort!!")
+    #print("end sort!!")
 
     return torch.stack(sorted_tensors, dim=0)
 
@@ -428,7 +467,9 @@ def process_shapenet_models(data_dir,k = 800, marching_cubes=False, sample_num=4
 
     padded_face_coord, mask = pad_face_coord_list(face_cood_list)
 
-    return pc_normal_list, return_mesh_list, padded_face_coord, mask
+    point_feature = calc_feature(pc_normal_list, return_mesh_list)
+
+    return point_feature, padded_face_coord, mask
 
 
 '''

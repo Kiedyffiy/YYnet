@@ -7,6 +7,7 @@ from accelerate import Accelerator
 from autoencoder import AutoEncoder
 from scipy.optimize import linear_sum_assignment  # Hungarian算法
 from tqdm.auto import tqdm
+from accelerate.utils import DistributedDataParallelKwargs
 
 class AutoTrainer(nn.Module):
     def __init__(
@@ -16,11 +17,13 @@ class AutoTrainer(nn.Module):
         lr=1e-3, 
         epochs=100, 
         batch_size=8, 
+        savepath = None,
         device = torch.device('cuda'),
     ):
         super().__init__()
         # 使用Accelerator处理
-        self.accelerator = Accelerator()
+        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+        self.accelerator = Accelerator(kwargs_handlers=[ddp_kwargs],gradient_accumulation_steps=4, mixed_precision="fp16")
         self.model = model
         self.dataset = dataset
         self.lr = lr
@@ -30,7 +33,7 @@ class AutoTrainer(nn.Module):
         self.dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
         self.optimizer = optim.Adam(model.parameters(), lr=lr)
         self.criterion = nn.MSELoss()
-
+        self.savepath = savepath
         # 将模型、优化器和数据加载器交给accelerator进行处理
         self.model, self.optimizer, self.dataloader = self.accelerator.prepare(
             self.model, self.optimizer, self.dataloader
@@ -51,8 +54,8 @@ class AutoTrainer(nn.Module):
         self.model = self.accelerator.unwrap_model(self.model)
         self.model.load_state_dict(torch.load(path))
 
-    def forward(self, pc_list, mesh_list, face_coords, mask, noise=None):
-        return self.model(pc_list, mesh_list, face_coords, mask)
+    def forward(self, point_feature, face_coords, mask):
+        return self.model(point_feature, face_coords, mask)
     
     def compute_masked_loss(self, pred_triangles, target_triangles, mask):
         batch_size, num_downsample, max_nf, _, _ = pred_triangles.shape
@@ -67,11 +70,10 @@ class AutoTrainer(nn.Module):
         return loss / batch_size
 
     def train_step(self, batch):
-        pc_list, mesh_list, face_coords, mask = batch
+        point_feature, face_coords, mask = batch
         self.optimizer.zero_grad()
 
-        output = self.forward(pc_list, mesh_list, face_coords, mask)
-        pred_triangles = output['logits']
+        pred_triangles = self.forward(point_feature, face_coords, mask)
         #pred_triangles = self.model.recon2(output['logits'])
 
         # 计算set loss
@@ -80,7 +82,7 @@ class AutoTrainer(nn.Module):
 
         self.optimizer.step()
 
-        return loss.item()
+        return loss.item(),pred_triangles.shape[0]
 
     def train(self):
         for epoch in tqdm(range(self.epochs), disable=not self.accelerator.is_local_main_process):
@@ -88,12 +90,17 @@ class AutoTrainer(nn.Module):
             progress_bar = tqdm(self.dataloader, desc=f"Epoch [{epoch+1}/{self.epochs}]", disable=not self.accelerator.is_local_main_process)
 
             for batch in progress_bar:
-                loss = self.train_step(batch)
-                epoch_loss += loss
-                progress_bar.set_postfix({'Loss': epoch_loss / len(self.dataloader)})
+                loss,batchSize = self.train_step(batch)
+                epoch_loss +=  (loss * batchSize)
+                progress_bar.set_postfix({'Loss': loss})
             if self.accelerator.is_main_process:
                 print(f'Epoch [{epoch+1}/{self.epochs}], Loss: {epoch_loss/len(self.dataloader):.4f}')
             #print(f'Epoch [{epoch+1}/{self.epochs}], Loss: {epoch_loss/len(self.dataloader):.4f}')
+                    # 每10个epoch保存一次checkpoint
+            if (epoch + 1) % 10 == 0 and self.accelerator.is_main_process:
+                checkpoint_path = self.savepath / f"checkpoint_epoch_{epoch+1}.pt"
+                print("save checkpoint!")
+                self.save(checkpoint_path)
     
     '''
     def compute_set_loss(self, pred_triangles, target_triangles):  # Hungarian

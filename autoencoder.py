@@ -242,7 +242,7 @@ class AutoEncoder(nn.Module):
                 get_latent_ff(**cache_args)
             ]))
 
-        self.to_outputs = nn.Linear(latent_dim, output_dim) if output_dim else nn.Identity()
+        #self.to_outputs = nn.Linear(latent_dim, output_dim) if output_dim else nn.Identity()
 
         self.codeL = 10
         self.embed_fn, self.code_out_dim = get_embedder(self.codeL)
@@ -260,7 +260,7 @@ class AutoEncoder(nn.Module):
         return encode_feature
 
 
-    def encode(self, pc_list, mesh_list, face_coords, mask):
+    def encode(self, point_feature, face_coords, mask):
 
         face_coords = face_coords.to(self.device)
 
@@ -282,7 +282,7 @@ class AutoEncoder(nn.Module):
         face_coor_z = self.mlp_model(z_embed)
 
         face_coor_embed = torch.cat((face_coor_x, face_coor_y, face_coor_z), dim=-1)
-
+        '''
         normalized_pc_normal_list = []
         for pc_normal, vertices1 in zip(pc_list, mesh_list):
             vertices = vertices1
@@ -306,7 +306,7 @@ class AutoEncoder(nn.Module):
 
         normalized_pc_normal_array = torch.stack(normalized_pc_normal_list)
         input_tensor = normalized_pc_normal_array.to(dtype=torch.float16, device=self.device)
-
+        '''
         '''
         for pc_normal, vertices1 in zip(pc_list, mesh_list):
             vertices = vertices1.cpu().numpy()
@@ -327,7 +327,7 @@ class AutoEncoder(nn.Module):
         input_tensor = torch.tensor(normalized_pc_normal_array, dtype=torch.float16, device = self.device)
         '''  
 
-        point_feature = self.point_encoder.encode_latents(input_tensor)
+        #point_feature = self.point_encoder.encode_latents(input_tensor)
 
         #print("point_feature_shape: ",point_feature.shape)
 
@@ -397,13 +397,13 @@ class AutoEncoder(nn.Module):
 
         return res  # [b, num of downsample, nf, 3 , 3]
 
-    def forward(self, pc_list, mesh_list, facecood_list , mask):
+    def forward(self, point_feature, facecood_list , mask):
         
-        x,y = self.encode(pc_list, mesh_list,facecood_list , mask)
+        x,y = self.encode(point_feature,facecood_list , mask)
 
         o = self.decode(x, y, mask)
 
-        return {'logits': o}
+        return o
     '''
     def forward(self, pc_list, mesh_list, facecood_list , mask ,noise = None):
         

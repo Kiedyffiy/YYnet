@@ -14,7 +14,8 @@ from timm.models.layers import DropPath
 
 from mesh_to_pc import (
     process_mesh_to_pc,
-    process_shapenet_models
+    process_shapenet_models,
+    calc_feature
 )
 
 import trimesh
@@ -37,7 +38,7 @@ from autotrainer import AutoTrainer
 shapenet_data_dir = '/root/data/ShapeNetCore.v2/03001627'
 save_path1 = '/root/src/trypc/traint'
 save_path2 = '/root/data/YYnetdata'
-pkl_file_path =  '/root/data/YYnetdata/20241008_190451/dataset.pkl'
+pkl_file_path =  '/root/data/YYnetdata/20241009_010626/dataset.pkl'
 print("start process loaddata!")
 
 dataset = GLBDataset.load_dataset(pkl_file_path)
@@ -47,16 +48,18 @@ dataset = GLBDataset.load_dataset(pkl_file_path)
 
 dataset.info()
 
-print("process_shapenet_finished!")
 
+print("process_shapenet_finished!")
 model = AutoEncoder()
 
 model.to(model.device)
 
-batch_size = 8
+#model = torch.nn.parallel.DistributedDataParallel(model, find_unused_parameters=True)
+
+batch_size = 16
 epochs = 100
 
-trainer = AutoTrainer(model=model, dataset=dataset, batch_size=batch_size, epochs=epochs)
+trainer = AutoTrainer(model=model, dataset=dataset, batch_size=batch_size, epochs=epochs,savepath=save_path1)
 trainer.train()
 
 trainer.save(save_path1)
@@ -74,6 +77,8 @@ epochs = 1
 
 trainer = AutoTrainer(model=model, dataset=dataset, batch_size=batch_size, epochs=epochs)
 trainer.train()
+
+trainer.save(save_path1)
 
 print("Training completed successfully!")
 '''
