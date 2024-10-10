@@ -33,22 +33,26 @@ class AutoTrainer(nn.Module):
         self.dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
         self.optimizer = optim.Adam(model.parameters(), lr=lr)
         self.criterion = nn.MSELoss()
-        self.savepath = savepath
+        self.savepath = Path(savepath)
         # 将模型、优化器和数据加载器交给accelerator进行处理
         self.model, self.optimizer, self.dataloader = self.accelerator.prepare(
             self.model, self.optimizer, self.dataloader
         )
 
     def save(self, path, overwrite=True):
-        path = Path(path)
+        if not isinstance(path, Path):
+            path = Path(path)
         assert overwrite or not path.exists()
 
         if self.accelerator.is_main_process:
-            self.accelerator.wait_for_everyone()
+            print("main process start saving!")
             torch.save(self.accelerator.unwrap_model(self.model).state_dict(), path)
+            print("save pt successfully!")
+        self.accelerator.wait_for_everyone()
 
     def load(self, path):
-        path = Path(path)
+        if not isinstance(path, Path):
+            path = Path(path)
         assert path.exists()
 
         self.model = self.accelerator.unwrap_model(self.model)
@@ -67,7 +71,7 @@ class AutoTrainer(nn.Module):
         # 计算损失
         loss = self.criterion(pred_triangles_masked, target_triangles)
 
-        return loss / batch_size
+        return loss
 
     def train_step(self, batch):
         point_feature, face_coords, mask = batch
@@ -81,7 +85,7 @@ class AutoTrainer(nn.Module):
         self.accelerator.backward(loss)  # 使用accelerator处理反向传播
 
         self.optimizer.step()
-
+        #print("loss: ",loss.item())
         return loss.item(),pred_triangles.shape[0]
 
     def train(self):
@@ -97,7 +101,7 @@ class AutoTrainer(nn.Module):
                 print(f'Epoch [{epoch+1}/{self.epochs}], Loss: {epoch_loss/len(self.dataloader):.4f}')
             #print(f'Epoch [{epoch+1}/{self.epochs}], Loss: {epoch_loss/len(self.dataloader):.4f}')
                     # 每10个epoch保存一次checkpoint
-            if (epoch + 1) % 10 == 0 and self.accelerator.is_main_process:
+            if (epoch + 1) % 10 == 0:
                 checkpoint_path = self.savepath / f"checkpoint_epoch_{epoch+1}.pt"
                 print("save checkpoint!")
                 self.save(checkpoint_path)

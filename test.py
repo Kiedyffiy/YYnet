@@ -17,6 +17,7 @@ from mesh_to_pc import (
     process_shapenet_models,
     calc_feature
 )
+from pathlib import Path
 
 import trimesh
 
@@ -37,6 +38,8 @@ from autotrainer import AutoTrainer
 
 shapenet_data_dir = '/root/data/ShapeNetCore.v2/03001627'
 save_path1 = '/root/src/trypc/traint'
+save_path1 = Path(save_path1) / f"trainres.pt"
+
 save_path2 = '/root/data/YYnetdata'
 pkl_file_path =  '/root/data/YYnetdata/20241009_010626/dataset.pkl'
 print("start process loaddata!")

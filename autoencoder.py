@@ -393,7 +393,7 @@ class AutoEncoder(nn.Module):
 
         res = self.recon3(output)
 
-        res = sort_mesh_with_mask(res , mask)
+        #res = sort_mesh_with_mask(res , mask)
 
         return res  # [b, num of downsample, nf, 3 , 3]
 
