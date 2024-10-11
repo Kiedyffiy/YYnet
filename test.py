@@ -1,46 +1,40 @@
 from functools import wraps
-
 import numpy as np
-
+import os
 import torch
 from torch import nn, einsum
 import torch.nn.functional as F
-
 from einops import rearrange, repeat
-
 #from torch_cluster import fps
-
 from timm.models.layers import DropPath
-
 from mesh_to_pc import (
     process_mesh_to_pc,
     process_shapenet_models,
     calc_feature
 )
 from pathlib import Path
-
 import trimesh
-
 from MeshAnything.miche.michelangelo.models.tsal.inference_utils import extract_geometry
-
 from functools import partial
-
 from MeshAnything.miche.encode import load_model
-
 from autoencoder import AutoEncoder
-
 from dataread import GLBDataset
-
 from autotrainer import AutoTrainer
-
+from datetime import datetime
 
 #shapenet_data_dir = '/root/src/MeshAnything-main/examples' 
 
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
 shapenet_data_dir = '/root/data/ShapeNetCore.v2/03001627'
-save_path1 = '/root/src/trypc/traint'
-save_path1 = Path(save_path1) / f"trainres.pt"
+save_path1 = '/root/data/YYnetcheck'
+
+save_path1 = os.path.join(save_path1,timestamp)
 
 save_path2 = '/root/data/YYnetdata'
+
+save_path3 = Path(save_path1) / f"trainres.pt"
+
 pkl_file_path =  '/root/data/YYnetdata/20241009_010626/dataset.pkl'
 print("start process loaddata!")
 
@@ -50,7 +44,6 @@ dataset = GLBDataset.load_dataset(pkl_file_path)
 #pc_normal_list, return_mesh_list, face_coods, mask = process_shapenet_models(shapenet_data_dir, marching_cubes=True, sample_num=4096)
 
 dataset.info()
-
 
 print("process_shapenet_finished!")
 model = AutoEncoder()
@@ -65,7 +58,9 @@ epochs = 100
 trainer = AutoTrainer(model=model, dataset=dataset, batch_size=batch_size, epochs=epochs,savepath=save_path1)
 trainer.train()
 
-trainer.save(save_path1)
+trainer.save(save_path3)
+
+trainer.evaluate()
 
 print("Training completed successfully!")
 
