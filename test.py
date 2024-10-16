@@ -35,6 +35,8 @@ save_path2 = '/root/data/YYnetdata'
 
 save_path3 = Path(save_path1) / f"trainres.pt"
 
+save_path4 = "/root/data/YYnetrebuild"
+
 pkl_file_path =  '/root/data/YYnetdata/20241009_010626/dataset.pkl'
 print("start process loaddata!")
 
@@ -55,10 +57,13 @@ model.to(model.device)
 batch_size = 16
 epochs = 100
 
-trainer = AutoTrainer(model=model, dataset=dataset, batch_size=batch_size, epochs=epochs,savepath=save_path1)
-trainer.train()
+trainer = AutoTrainer(model=model, dataset=dataset, batch_size=batch_size, epochs=epochs,savepath=save_path1,modelsavepath=save_path4)
 
-trainer.save(save_path3)
+trainer.load("/root/data/YYnetcheck/20241011_140856/trainres.pt")
+
+#trainer.train()
+
+#trainer.save(save_path3)
 
 trainer.evaluate()
 

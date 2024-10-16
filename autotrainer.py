@@ -9,7 +9,11 @@ from scipy.optimize import linear_sum_assignment  # Hungarian算法
 from tqdm.auto import tqdm
 from accelerate.utils import DistributedDataParallelKwargs
 from torch.utils.data import random_split
-
+from rebuild import (
+    export_models,
+    export_cpmodels
+)
+import os
 class AutoTrainer(nn.Module):
     def __init__(
         self, 
@@ -20,6 +24,7 @@ class AutoTrainer(nn.Module):
         batch_size=16, 
         test_size = 32,
         savepath = None,
+        modelsavepath = None,
         device = torch.device('cuda'),
     ):
         super().__init__()
@@ -41,6 +46,7 @@ class AutoTrainer(nn.Module):
         self.optimizer = optim.Adam(model.parameters(), lr=lr)
         self.criterion = nn.MSELoss()
         self.savepath = Path(savepath)
+        self.modelsavepath = modelsavepath
         # 将模型、优化器和数据加载器交给accelerator进行处理
         self.model, self.optimizer, self.train_dataloader, self.test_dataloader = self.accelerator.prepare(
             self.model, self.optimizer, self.train_dataloader, self.test_dataloader
@@ -147,6 +153,12 @@ class AutoTrainer(nn.Module):
                 # 累积损失和样本数量
                 total_loss += loss.item() * pred_triangles.shape[0]  # 乘以batch中的样本数
                 total_samples += pred_triangles.shape[0]
+
+                #重建模型
+                current_device = torch.cuda.current_device()
+                save_dir = os.path.join(self.modelsavepath,f"v3")
+                export_cpmodels(pred_triangles,face_coords,mask,save_dir)
+                print(f"export finish! GPU: {current_device}")
 
         # 计算平均损失
         total_loss_tensor = torch.tensor(total_loss, device=self.device)
