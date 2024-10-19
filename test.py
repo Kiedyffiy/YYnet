@@ -48,24 +48,26 @@ dataset = GLBDataset.load_dataset(pkl_file_path)
 dataset.info()
 
 print("process_shapenet_finished!")
-model = AutoEncoder()
 
-model.to(model.device)
 
 #model = torch.nn.parallel.DistributedDataParallel(model, find_unused_parameters=True)
 
-batch_size = 16
-epochs = 100
+batch_size = 2
+epochs = 200
+
+model = AutoEncoder()
+model.to(model.device)
+
 
 trainer = AutoTrainer(model=model, dataset=dataset, batch_size=batch_size, epochs=epochs,savepath=save_path1,modelsavepath=save_path4)
 
-trainer.load("/root/data/YYnetcheck/20241011_140856/trainres.pt")
+#trainer.load("/root/data/YYnetcheck/20241011_140856/trainres.pt")
 
-#trainer.train()
+trainer.train()
 
-#trainer.save(save_path3)
+trainer.save(save_path3)
 
-trainer.evaluate()
+#trainer.evaluate()
 
 print("Training completed successfully!")
 

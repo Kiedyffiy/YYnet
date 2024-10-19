@@ -19,7 +19,7 @@ class AutoTrainer(nn.Module):
         self, 
         model: AutoEncoder, 
         dataset, 
-        lr=1e-3, 
+        lr=1e-4, 
         epochs=100, 
         batch_size=16, 
         test_size = 32,
@@ -31,6 +31,7 @@ class AutoTrainer(nn.Module):
         # 使用Accelerator处理
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         self.accelerator = Accelerator(kwargs_handlers=[ddp_kwargs],gradient_accumulation_steps=4, mixed_precision="fp16")
+
         self.model = model
         self.dataset = dataset
         self.lr = lr
@@ -75,8 +76,8 @@ class AutoTrainer(nn.Module):
         self.model = self.accelerator.unwrap_model(self.model)
         self.model.load_state_dict(torch.load(path))
 
-    def forward(self, point_feature, face_coords, mask):
-        return self.model(point_feature, face_coords, mask)
+    def forward(self, point_feature, mask):
+        return self.model(point_feature, mask)
     
     def compute_masked_loss(self, pred_triangles, target_triangles, mask):
         batch_size, num_downsample, max_nf, _, _ = pred_triangles.shape
@@ -94,7 +95,7 @@ class AutoTrainer(nn.Module):
         point_feature, face_coords, mask = batch
         self.optimizer.zero_grad()
 
-        pred_triangles = self.forward(point_feature, face_coords, mask)
+        pred_triangles = self.forward(point_feature, mask)
         #pred_triangles = self.model.recon2(output['logits'])
 
         # 计算set loss
@@ -145,7 +146,7 @@ class AutoTrainer(nn.Module):
                 point_feature, face_coords, mask = batch
 
                 # 前向传播
-                pred_triangles = self.forward(point_feature, face_coords, mask)
+                pred_triangles = self.forward(point_feature, mask)
 
                 # 计算损失
                 loss = self.compute_masked_loss(pred_triangles, face_coords, mask)

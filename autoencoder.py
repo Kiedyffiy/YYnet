@@ -17,6 +17,7 @@ from mesh_to_pc import (
     sort_mesh_with_mask,
 
 )
+import math
 
 import trimesh
 
@@ -200,34 +201,46 @@ class AutoEncoder(nn.Module):
         heads=8,
         dim_head=64,
         weight_tie_layers=False,
-        depth=24,
+        depth=12,
         output_dim = 768,
         decoder_ff=True,    
         cond_length = 257,
         word_embed_proj_dim = 768,
         cond_dim = 768,
         num_vertices_per_face = 3,
-
+        depth_cross = 8,
+        d_model = 768,
+        max_num_faces = 1000,
     ):
         super().__init__()
         self.device = torch.device('cuda')
         self.point_encoder = load_model(ckpt_path=None)
 
         self.num_vertices_per_face = num_vertices_per_face
-
+        self.d_model = d_model
         self.latent_dim = latent_dim
-        self.cross_attend_blocks = nn.ModuleList([
-            PreNorm(dim, Attention(dim, dim, heads = 1, dim_head = dim), context_dim = dim),
-            PreNorm(dim, FeedForward(dim))
-        ])
+
+        # 定义多层交叉注意力
+        self.cross_attend_blocks = nn.ModuleList([])
+
+        for i in range(depth_cross):
+            self.cross_attend_blocks.append(nn.ModuleList([
+                PreNorm(dim, Attention(dim, dim, heads=4, dim_head=dim), context_dim=dim),  # 独立的交叉注意力层
+                PreNorm(dim, FeedForward(dim))  # 独立的前馈层
+        ]))
+
+        #self.cross_attend_blocks = nn.ModuleList([
+        #    PreNorm(dim, Attention(dim, dim, heads = 1, dim_head = dim), context_dim = dim),
+        #    PreNorm(dim, FeedForward(dim))
+        #])
         self.cond_dim = cond_dim
         self.cond_length = cond_length
         self.word_embed_proj_dim = word_embed_proj_dim
         self.cond_head_proj = nn.Linear(self.cond_dim, self.word_embed_proj_dim)
         self.cond_proj = nn.Linear(self.cond_dim * 2, self.word_embed_proj_dim)
 
-        self.decoder_ff = PreNorm(latent_dim, FeedForward(latent_dim)) if decoder_ff else None
-        self.decoder_cross_attn = PreNorm(latent_dim, Attention(latent_dim, dim, heads = 1, dim_head = dim), context_dim = dim)
+        #self.decoder_ff = PreNorm(latent_dim, FeedForward(latent_dim)) if decoder_ff else None
+        #self.decoder_cross_attn = PreNorm(latent_dim, Attention(latent_dim, dim, heads = 1, dim_head = dim), context_dim = dim)
 
         get_latent_attn = lambda: PreNorm(dim, Attention(dim, dim, heads=heads, dim_head=dim_head, drop_path_rate=0.1))
         get_latent_ff = lambda: PreNorm(dim, FeedForward(dim, drop_path_rate=0.1))
@@ -246,10 +259,33 @@ class AutoEncoder(nn.Module):
 
         self.codeL = 10
         self.embed_fn, self.code_out_dim = get_embedder(self.codeL)
+        #self.mlp_model = MLP(self.num_vertices_per_face * 3, 128, 384, dim - self.d_model)
         self.mlp_model = MLP((self.codeL * 2 + 1) * self.num_vertices_per_face, 128, 384, dim // 3 )
         self.mlp_model2 = MLP(dim , dim // 4 , dim // 12 , 9)
+        self.max_num_faces = max_num_faces
+        
+        self.tokens = nn.Parameter(torch.randn(self.max_num_faces, self.num_vertices_per_face, 3))
+        self.position_encoding = self._create_sinusoidal_position_encoding(self.max_num_faces, self.d_model)
+        
+    def _create_sinusoidal_position_encoding(self,max_num_faces, d_model):
+        """
+        创建正弦余弦位置编码。
+        :param max_num_faces: 每次降采样后的最大面片数
+        :param d_model: 特征维度
+        :return: 正弦余弦位置编码，形状为 [max_num_faces, d_model]
+        """
+        position_enc = torch.zeros((max_num_faces, d_model))
 
-
+        # 根据公式计算每个位置的编码
+        for pos in range(max_num_faces):
+            for i in range(0, d_model, 2):  # 偶数维度用sin
+                div_term = math.exp(i * -math.log(10000.0) / d_model)
+                position_enc[pos, i] = math.sin(pos * div_term)
+                if i + 1 < d_model:  # 奇数维度用cos
+                    position_enc[pos, i + 1] = math.cos(pos * div_term)
+        
+        return position_enc
+    
     def process_point_feature(self, point_feature):
         encode_feature = torch.zeros(point_feature.shape[0], self.cond_length, self.word_embed_proj_dim,
                                     device=self.cond_head_proj.weight.device, dtype=self.cond_head_proj.weight.dtype)
@@ -260,12 +296,23 @@ class AutoEncoder(nn.Module):
         return encode_feature
 
 
-    def encode(self, point_feature, face_coords, mask):
+    def encode(self, point_feature, mask):
 
-        face_coords = face_coords.to(self.device)
-
+        #face_coords = face_coords.to(self.device)
         mask = mask.to(self.device)
 
+        batch_size, num_downsample_times, num_faces = mask.shape
+
+        truncated_tokens = self.tokens[:num_faces]
+        truncated_position_encoding = self.position_encoding[:num_faces]
+
+        raw_tokens = truncated_tokens.unsqueeze(0).unsqueeze(0).expand(batch_size, num_downsample_times, -1, -1, -1) #[b,nd,nf,3,3]
+        raw_position_encoding = truncated_position_encoding.unsqueeze(0).unsqueeze(0).expand(batch_size, num_downsample_times, -1, -1) #[b,nd,nf,d_model]
+
+        #raw_tokens = rearrange(raw_tokens,'b nd nf nv c -> b nd nf (nv c)')
+        face_coords = raw_tokens
+
+        
         x_coords = face_coords[..., 0].unsqueeze(-1)
         y_coords = face_coords[..., 1].unsqueeze(-1)
         z_coords = face_coords[..., 2].unsqueeze(-1)
@@ -282,50 +329,8 @@ class AutoEncoder(nn.Module):
         face_coor_z = self.mlp_model(z_embed)
 
         face_coor_embed = torch.cat((face_coor_x, face_coor_y, face_coor_z), dim=-1)
-        '''
-        normalized_pc_normal_list = []
-        for pc_normal, vertices1 in zip(pc_list, mesh_list):
-            vertices = vertices1
-            #print(vertices.shape)
-            pc_coor = pc_normal[:, :3]
-            normals = pc_normal[:, 3:]
-
-            bounds_min, _ = torch.min(vertices, dim=0)
-            bounds_max, _ = torch.max(vertices, dim=0)
-            bounds = torch.stack([bounds_min, bounds_max])
-            #print(bounds.shape)
-
-            pc_coor = pc_coor - (bounds[0] + bounds[1])[None, :] / 2
-            pc_coor = pc_coor / (bounds[1] - bounds[0]).max()
-            pc_coor = pc_coor / torch.abs(pc_coor).max() * 0.9995  # input should be from -1 to 1
-
-            assert (torch.norm(normals, dim=-1) > 0.99).all(), "normals should be unit vectors, something wrong"
-
-            normalized_pc_normal = torch.cat([pc_coor, normals], dim=-1).to(dtype=torch.float16)
-            normalized_pc_normal_list.append(normalized_pc_normal)
-
-        normalized_pc_normal_array = torch.stack(normalized_pc_normal_list)
-        input_tensor = normalized_pc_normal_array.to(dtype=torch.float16, device=self.device)
-        '''
-        '''
-        for pc_normal, vertices1 in zip(pc_list, mesh_list):
-            vertices = vertices1.cpu().numpy()
-            print(vertices.shape)
-            pc_coor = pc_normal[:, :3]
-            normals = pc_normal[:, 3:]
-            bounds = np.array([vertices.min(axis=0), vertices.max(axis=0)])
-            #print(bounds.shape)
-            pc_coor = pc_coor - (bounds[0] + bounds[1])[None, :] / 2
-            pc_coor = pc_coor / (bounds[1] - bounds[0]).max()
-            pc_coor = pc_coor / np.abs(pc_coor).max() * 0.9995  # input should be from -1 to 1
-            assert (np.linalg.norm(normals, axis=-1) > 0.99).all(), "normals should be unit vectors, something wrong"
-            normalized_pc_normal = np.concatenate([pc_coor, normals], axis=-1, dtype=np.float16)
-            normalized_pc_normal_list.append(normalized_pc_normal)
-
-        normalized_pc_normal_array = np.array(normalized_pc_normal_list)
-
-        input_tensor = torch.tensor(normalized_pc_normal_array, dtype=torch.float16, device = self.device)
-        '''  
+        raw_position_encoding = raw_position_encoding.to(self.device)
+        face_coor_embed = face_coor_embed + raw_position_encoding
 
         #point_feature = self.point_encoder.encode_latents(input_tensor)
 
@@ -377,17 +382,17 @@ class AutoEncoder(nn.Module):
             x = self_ff(x) + x
 
         # Cross attention and feed-forward layers
-        cross_attn, cross_ff = self.cross_attend_blocks
+        #cross_attn, cross_ff = self.cross_attend_blocks
 
         for i in range(num_of_downsample):
             # Apply self-attention and feed-forward layers for the context
 
             mask1_i = mask1[:, i, :, :]  # Select mask for the current downsample level 
             yi = face_coor[:, i, :, :]  # [b, nf, dim] for the current downsample level
-            yi = cross_attn(yi, context=x, mask=mask1_i) + yi  # Apply cross-attention
-            yi = cross_ff(yi) + yi  # Apply feed-forward network
-            yi = yi * mask[:, i, :].unsqueeze(-1)  # Apply mask
-            
+            for cross_attn, cross_ff in self.cross_attend_blocks:
+                yi = cross_attn(yi, context=x, mask=mask1_i) + yi  # Apply cross-attention
+                yi = cross_ff(yi) + yi  # Apply feed-forward network
+                yi = yi * mask[:, i, :].unsqueeze(-1)  # Apply mask
             # Store the result for the current downsample level
             output[:, i, :, :] = yi
 
@@ -397,9 +402,9 @@ class AutoEncoder(nn.Module):
 
         return res  # [b, num of downsample, nf, 3 , 3]
 
-    def forward(self, point_feature, facecood_list , mask):
+    def forward(self, point_feature, mask):
         
-        x,y = self.encode(point_feature,facecood_list , mask)
+        x,y = self.encode(point_feature,mask)
 
         o = self.decode(x, y, mask)
 
@@ -513,4 +518,48 @@ class AutoEncoder(nn.Module):
         print("y_shape: ",y.shape)
 
         return self.to_outputs(y)
+    '''  
+
+    '''
+        normalized_pc_normal_list = []
+        for pc_normal, vertices1 in zip(pc_list, mesh_list):
+            vertices = vertices1
+            #print(vertices.shape)
+            pc_coor = pc_normal[:, :3]
+            normals = pc_normal[:, 3:]
+
+            bounds_min, _ = torch.min(vertices, dim=0)
+            bounds_max, _ = torch.max(vertices, dim=0)
+            bounds = torch.stack([bounds_min, bounds_max])
+            #print(bounds.shape)
+
+            pc_coor = pc_coor - (bounds[0] + bounds[1])[None, :] / 2
+            pc_coor = pc_coor / (bounds[1] - bounds[0]).max()
+            pc_coor = pc_coor / torch.abs(pc_coor).max() * 0.9995  # input should be from -1 to 1
+
+            assert (torch.norm(normals, dim=-1) > 0.99).all(), "normals should be unit vectors, something wrong"
+
+            normalized_pc_normal = torch.cat([pc_coor, normals], dim=-1).to(dtype=torch.float16)
+            normalized_pc_normal_list.append(normalized_pc_normal)
+
+        normalized_pc_normal_array = torch.stack(normalized_pc_normal_list)
+        input_tensor = normalized_pc_normal_array.to(dtype=torch.float16, device=self.device)
+
+        for pc_normal, vertices1 in zip(pc_list, mesh_list):
+            vertices = vertices1.cpu().numpy()
+            print(vertices.shape)
+            pc_coor = pc_normal[:, :3]
+            normals = pc_normal[:, 3:]
+            bounds = np.array([vertices.min(axis=0), vertices.max(axis=0)])
+            #print(bounds.shape)
+            pc_coor = pc_coor - (bounds[0] + bounds[1])[None, :] / 2
+            pc_coor = pc_coor / (bounds[1] - bounds[0]).max()
+            pc_coor = pc_coor / np.abs(pc_coor).max() * 0.9995  # input should be from -1 to 1
+            assert (np.linalg.norm(normals, axis=-1) > 0.99).all(), "normals should be unit vectors, something wrong"
+            normalized_pc_normal = np.concatenate([pc_coor, normals], axis=-1, dtype=np.float16)
+            normalized_pc_normal_list.append(normalized_pc_normal)
+
+        normalized_pc_normal_array = np.array(normalized_pc_normal_list)
+
+        input_tensor = torch.tensor(normalized_pc_normal_array, dtype=torch.float16, device = self.device)
     '''  
