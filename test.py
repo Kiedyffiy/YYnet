@@ -21,7 +21,7 @@ from autoencoder import AutoEncoder
 from dataread import GLBDataset
 from autotrainer import AutoTrainer
 from datetime import datetime
-
+from torch.utils.data import random_split
 #shapenet_data_dir = '/root/src/MeshAnything-main/examples' 
 
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -37,7 +37,7 @@ save_path3 = Path(save_path1) / f"trainres.pt"
 
 save_path4 = "/root/data/YYnetrebuild"
 
-pkl_file_path =  '/root/data/YYnetdata/20241009_010626/dataset.pkl'
+pkl_file_path =  '/root/data/YYnetdata/20241023_130942/dataset.pkl'
 print("start process loaddata!")
 
 dataset = GLBDataset.load_dataset(pkl_file_path)
@@ -50,19 +50,25 @@ dataset.info()
 print("process_shapenet_finished!")
 
 
-#model = torch.nn.parallel.DistributedDataParallel(model, find_unused_parameters=True)
+#dataset1, dataset2 = random_split(dataset, [len(dataset) - 128, 128])
 
-batch_size = 2
+#subset2_indices = dataset2.indices
+#torch.save({'subset2_indices': subset2_indices}, '/root/data/YYnetdata/small/subsets_indices.pth')
+#print("have save subsets_indices!")
+checkpoint = torch.load('/root/data/YYnetdata/small/subsets_indices.pth')
+dataset2 = torch.utils.data.Subset(dataset, checkpoint['subset2_indices'])
+print("have load subsets_indices!")
+
+
+batch_size = 8
 epochs = 200
 
 model = AutoEncoder()
-model.to(model.device)
+#model.to(model.device)
 
 
-trainer = AutoTrainer(model=model, dataset=dataset, batch_size=batch_size, epochs=epochs,savepath=save_path1,modelsavepath=save_path4)
-
-#trainer.load("/root/data/YYnetcheck/20241011_140856/trainres.pt")
-
+trainer = AutoTrainer(model=model, dataset=dataset2, batch_size=batch_size, epochs=epochs,savepath=save_path1,modelsavepath=save_path4)
+trainer.load("/root/data/YYnetcheck/20241023_195212/trainres.pt")
 trainer.train()
 
 trainer.save(save_path3)
@@ -70,6 +76,11 @@ trainer.save(save_path3)
 #trainer.evaluate()
 
 print("Training completed successfully!")
+
+
+
+
+
 
 '''
 

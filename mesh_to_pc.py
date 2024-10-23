@@ -9,7 +9,7 @@ from tqdm import tqdm
 from MeshAnything.miche.encode import load_model
 
 
-point_encoder = load_model(ckpt_path=None)
+point_encoder = load_model(ckpt_path="MeshAnything/miche/shapevae-256.ckpt")
 device = torch.device('cuda')
 
 # 加载ShapeNet模型

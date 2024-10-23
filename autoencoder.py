@@ -208,13 +208,13 @@ class AutoEncoder(nn.Module):
         word_embed_proj_dim = 768,
         cond_dim = 768,
         num_vertices_per_face = 3,
-        depth_cross = 8,
+        depth_cross = 12,
         d_model = 768,
         max_num_faces = 1000,
     ):
         super().__init__()
         self.device = torch.device('cuda')
-        self.point_encoder = load_model(ckpt_path=None)
+        self.point_encoder = load_model(ckpt_path="MeshAnything/miche/shapevae-256.ckpt")
 
         self.num_vertices_per_face = num_vertices_per_face
         self.d_model = d_model
@@ -225,7 +225,7 @@ class AutoEncoder(nn.Module):
 
         for i in range(depth_cross):
             self.cross_attend_blocks.append(nn.ModuleList([
-                PreNorm(dim, Attention(dim, dim, heads=4, dim_head=dim), context_dim=dim),  # 独立的交叉注意力层
+                PreNorm(dim, Attention(dim, dim, heads=8, dim_head=dim), context_dim=dim),  # 独立的交叉注意力层
                 PreNorm(dim, FeedForward(dim))  # 独立的前馈层
         ]))
 
@@ -241,7 +241,7 @@ class AutoEncoder(nn.Module):
 
         #self.decoder_ff = PreNorm(latent_dim, FeedForward(latent_dim)) if decoder_ff else None
         #self.decoder_cross_attn = PreNorm(latent_dim, Attention(latent_dim, dim, heads = 1, dim_head = dim), context_dim = dim)
-
+        '''
         get_latent_attn = lambda: PreNorm(dim, Attention(dim, dim, heads=heads, dim_head=dim_head, drop_path_rate=0.1))
         get_latent_ff = lambda: PreNorm(dim, FeedForward(dim, drop_path_rate=0.1))
         get_latent_attn, get_latent_ff = map(cache_fn, (get_latent_attn, get_latent_ff))
@@ -254,26 +254,26 @@ class AutoEncoder(nn.Module):
                 get_latent_attn(**cache_args),
                 get_latent_ff(**cache_args)
             ]))
-
+        '''
         #self.to_outputs = nn.Linear(latent_dim, output_dim) if output_dim else nn.Identity()
 
-        self.codeL = 10
-        self.embed_fn, self.code_out_dim = get_embedder(self.codeL)
-        #self.mlp_model = MLP(self.num_vertices_per_face * 3, 128, 384, dim - self.d_model)
-        self.mlp_model = MLP((self.codeL * 2 + 1) * self.num_vertices_per_face, 128, 384, dim // 3 )
+        #self.codeL = 10
+        #self.embed_fn, self.code_out_dim = get_embedder(self.codeL)
+        self.mlp_model = MLP(self.num_vertices_per_face * 3, 128, 384, dim)
+        #self.mlp_model = MLP((self.codeL * 2 + 1) * self.num_vertices_per_face, 128, 384, dim // 3 )
         self.mlp_model2 = MLP(dim , dim // 4 , dim // 12 , 9)
         self.max_num_faces = max_num_faces
-        
-        self.tokens = nn.Parameter(torch.randn(self.max_num_faces, self.num_vertices_per_face, 3))
+
+        self.tokens = [[1.1965, -0.1948, -0.6660],
+                        [1.3214,  1.8411,  1.3264],
+                        [-0.5045, -0.0491, -0.8510]]
+        self.tokens = nn.Parameter(torch.tensor(self.tokens))
+        print("self.tokens: ",self.tokens)
+        #self.tokens = nn.Parameter(torch.randn(self.max_num_faces, self.num_vertices_per_face, 3))
         self.position_encoding = self._create_sinusoidal_position_encoding(self.max_num_faces, self.d_model)
         
     def _create_sinusoidal_position_encoding(self,max_num_faces, d_model):
-        """
-        创建正弦余弦位置编码。
-        :param max_num_faces: 每次降采样后的最大面片数
-        :param d_model: 特征维度
-        :return: 正弦余弦位置编码，形状为 [max_num_faces, d_model]
-        """
+
         position_enc = torch.zeros((max_num_faces, d_model))
 
         # 根据公式计算每个位置的编码
@@ -303,16 +303,26 @@ class AutoEncoder(nn.Module):
 
         batch_size, num_downsample_times, num_faces = mask.shape
 
-        truncated_tokens = self.tokens[:num_faces]
+        truncated_tokens = self.tokens
         truncated_position_encoding = self.position_encoding[:num_faces]
 
-        raw_tokens = truncated_tokens.unsqueeze(0).unsqueeze(0).expand(batch_size, num_downsample_times, -1, -1, -1) #[b,nd,nf,3,3]
+        truncated_tokens_expanded = truncated_tokens.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+        raw_tokens = torch.zeros((batch_size, num_downsample_times, num_faces, 3, 3), dtype=truncated_tokens.dtype)
+        raw_tokens = raw_tokens.to(self.device)
+        raw_tokens[mask] = truncated_tokens_expanded
+
+        #raw_tokens = truncated_tokens.unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(batch_size, num_downsample_times, num_faces, -1, -1) #[b,nd,nf,3,3]
+        #raw_tokens = raw_tokens.to(self.device)
+
         raw_position_encoding = truncated_position_encoding.unsqueeze(0).unsqueeze(0).expand(batch_size, num_downsample_times, -1, -1) #[b,nd,nf,d_model]
 
-        #raw_tokens = rearrange(raw_tokens,'b nd nf nv c -> b nd nf (nv c)')
-        face_coords = raw_tokens
-
         
+
+        raw_tokens = rearrange(raw_tokens,'b nd nf nv c -> b nd nf (nv c)') #[b,nd,nf,9]
+        face_coords = raw_tokens
+        face_coords[~mask] = 0
+
+        '''
         x_coords = face_coords[..., 0].unsqueeze(-1)
         y_coords = face_coords[..., 1].unsqueeze(-1)
         z_coords = face_coords[..., 2].unsqueeze(-1)
@@ -329,13 +339,16 @@ class AutoEncoder(nn.Module):
         face_coor_z = self.mlp_model(z_embed)
 
         face_coor_embed = torch.cat((face_coor_x, face_coor_y, face_coor_z), dim=-1)
+        '''
+        face_coor_embed = self.mlp_model(face_coords)
         raw_position_encoding = raw_position_encoding.to(self.device)
         face_coor_embed = face_coor_embed + raw_position_encoding
+        face_coor_embed[~mask] = 0
 
         #point_feature = self.point_encoder.encode_latents(input_tensor)
 
         #print("point_feature_shape: ",point_feature.shape)
-
+        #pro_point_feature = point_feature
         pro_point_feature = self.process_point_feature(point_feature)
 
         return face_coor_embed , pro_point_feature # [b,nd,nf,dim] , [b,257,dim]
@@ -377,9 +390,9 @@ class AutoEncoder(nn.Module):
         # Initialize output tensor
         output = torch.zeros_like(face_coor)  # [b, num of downsample, nf, dim]
 
-        for self_attn, self_ff in self.layers:
-            x = self_attn(x) + x
-            x = self_ff(x) + x
+        #for self_attn, self_ff in self.layers:
+        #    x = self_attn(x) + x
+        #    x = self_ff(x) + x
 
         # Cross attention and feed-forward layers
         #cross_attn, cross_ff = self.cross_attend_blocks
