@@ -7,10 +7,14 @@ import torch
 from collections import OrderedDict
 from tqdm import tqdm
 from MeshAnything.miche.encode import load_model
-
-
-point_encoder = load_model(ckpt_path="MeshAnything/miche/shapevae-256.ckpt")
+from autoencoder import(
+    undiscretize,
+    discretize
+)
+from beartype.typing import Tuple
+point_encoder = load_model(ckpt_path="/root/data/YYnetPreTrained/shapevae-256.ckpt")
 device = torch.device('cuda')
+coor_continuous_range: Tuple[float, float] = (-1., 1.)
 
 # 加载ShapeNet模型
 def load_shapenet_model(file_path):
@@ -19,12 +23,25 @@ def load_shapenet_model(file_path):
         # 如果是Scene对象，合并所有几何体为一个Trimesh对象
         mesh = mesh.dump(concatenate=True)
     return mesh
-
+'''
 def normalize_vertices(vertices, scale=0.9):
     bbmin, bbmax = vertices.min(0), vertices.max(0)
     center = (bbmin + bbmax) * 0.5
     scale = 2.0 * scale / (bbmax - bbmin).max()
     vertices = (vertices - center) * scale
+    return vertices, center, scale
+'''
+def normalize_vertices(vertices):
+    # 找到边界框的最小和最大值
+    bbmin, bbmax = vertices.min(0), vertices.max(0)
+    
+    # 计算中心和尺度因子，使得数据范围变为 [-1, 1]
+    center = (bbmin + bbmax) * 0.5
+    scale = 2.0 / (bbmax - bbmin).max()  # 缩放使得最大的边长为 2，映射到 [-1, 1]
+    
+    # 平移并缩放顶点
+    vertices = (vertices - center) * scale
+    
     return vertices, center, scale
 
 def export_to_watertight(normalized_mesh, octree_depth: int = 7):
@@ -55,7 +72,7 @@ def export_to_watertight(normalized_mesh, octree_depth: int = 7):
     # vertices = vertices / to_orig_scale + to_orig_center
     mesh = trimesh.Trimesh(vertices, faces, normals=normals)
     #print("len of in face ",len(faces))
-    #face_coord = torch.tensor(vertices[faces], dtype=torch.float32)  # 'nf nvf c'
+    #face_coord = torch.tensor(vertices[faces], dtype=torch.float16)  # 'nf nvf c'
     #print("face_coord_shape: ",face_coord.shape)
     return mesh  #, face_coord
 
@@ -91,6 +108,29 @@ def calc_feature(pc_list,mesh_list,batch_size=64):
         #point_feature = point_encoder.encode_latents(input_tensor)
         print("end calc feature!")
         print("point_feature.shape: ",point_feature.shape)
+        return point_feature
+
+def calc_feature_small(pc_list,mesh_list):
+        normalized_pc_normal_list = []
+        print("start calc feature!")
+        for pc_normal, vertices in zip(pc_list, mesh_list):
+            #vertices = vertices1
+            #print(vertices.shape)
+            pc_coor = pc_normal[:, :3]
+            normals = pc_normal[:, 3:]
+            bounds = np.array([vertices.min(axis=0), vertices.max(axis=0)])
+            #print(bounds.shape)
+            pc_coor = pc_coor - (bounds[0] + bounds[1])[None, :] / 2
+            pc_coor = pc_coor / (bounds[1] - bounds[0]).max()
+            pc_coor = pc_coor / np.abs(pc_coor).max() * 0.9995  # input should be from -1 to 1
+            assert (np.linalg.norm(normals, axis=-1) > 0.99).all(), "normals should be unit vectors, something wrong"
+            normalized_pc_normal = np.concatenate([pc_coor, normals], axis=-1, dtype=np.float16)
+            normalized_pc_normal_list.append(normalized_pc_normal)
+
+        normalized_pc_normal_array = np.array(normalized_pc_normal_list)
+        input_tensor = torch.tensor(normalized_pc_normal_array, dtype=torch.float16, device = device)
+        point_feature = point_encoder.encode_latents(input_tensor)
+
         return point_feature
 
 def rebuild_3d_model(face_cood, mask):
@@ -246,7 +286,7 @@ def pad_face_coords_sample(all_face_coods):
         nf = face_coords.shape[0]
         
         # 初始化填充后的 face_coords 和 mask
-        padded_face_coords = np.zeros((max_nf, nvf, c), dtype=np.float32)
+        padded_face_coords = np.zeros((max_nf, nvf, c), dtype=np.float16)
         mask = np.zeros((max_nf,), dtype=np.bool_)
         
         # 填充 face_coords
@@ -266,20 +306,33 @@ def get_facecood(mesh, normalize=True):
         vertices = mesh.vertices
         center = None
         scale_factor = None
-    face_coords = vertices[mesh.faces]
-    #face_coord_tensor = torch.tensor(face_coords, dtype=torch.float32)
+    
+    face_coords = vertices[mesh.faces]   #你真的是Tensor吗 #no
+    dis_face_coords = discretize(torch.tensor(face_coords),continuous_range=coor_continuous_range,num_discrete=128) #离散化
+    dis_face_coords = undiscretize(dis_face_coords,continuous_range=coor_continuous_range,num_discrete=128) #解离散化
+    #face_coord_tensor = torch.tensor(face_coords, dtype=torch.float16)
     #print(f"Face coordinates shape: {face_coord_tensor.shape}")
-    return face_coords
+    return dis_face_coords
     #return face_coord_tensor
 
 
-def simplify_mesh(mesh, target_faces):
+def simplify_mesh(mesh, target_faces,sample_num,marching_cubes=False):
     """简化 mesh 并返回降采样后的 face_coord"""
     #print("target_faces: ",target_faces)
     simplified_mesh = mesh.simplify_quadric_decimation(target_faces) #simplify_quadric_decimation
     #print(simplified_mesh.faces.shape)
     face_coord = get_facecood(simplified_mesh)
-    return face_coord
+    mesh2 = None
+    # 检查是否需要进行 marching cubes 操作
+    if marching_cubes:
+        mesh2 = export_to_watertight(mesh)
+    else:
+        mesh2 = mesh
+    # 采样点云并计算法向量
+    points, face_idx = mesh2.sample(sample_num, return_index=True)
+    normals = mesh2.face_normals[face_idx]
+    pc_normal = np.concatenate([points, normals], axis=-1, dtype=np.float16)    
+    return face_coord ,mesh2.vertices ,pc_normal
 
 def process_mesh_to_pc(mesh_list, marching_cubes=False, sample_num=4096 ,decrement = 0.05 ,stoppercent = 0.5):
     # mesh_list : list of trimesh
@@ -291,17 +344,23 @@ def process_mesh_to_pc(mesh_list, marching_cubes=False, sample_num=4096 ,decreme
         # 提取原始 face_coord
         original_face_coord = get_facecood(mesh)
         all_face_coods = [original_face_coord]
+        all_pc_normal = []
+        all_mesh_list = []
 
         # 检查是否需要进行 marching cubes 操作
         if marching_cubes:
             mesh2 = export_to_watertight(mesh)
             #print("MC over!")
-            return_mesh_list.append(mesh2.vertices) #减小内存占用
+            all_mesh_list.append(mesh2.vertices) #减小内存占用
         else:
             mesh2 = mesh
-            return_mesh_list.append(mesh2.vertices) #减小内存占用
+            all_mesh_list.append(mesh2.vertices) #减小内存占用
         
-
+        # 采样点云并计算法向量
+        points, face_idx = mesh2.sample(sample_num, return_index=True)
+        normals = mesh2.face_normals[face_idx]
+        pc_normal = np.concatenate([points, normals], axis=-1, dtype=np.float16)
+        all_pc_normal.append(pc_normal)
         
         num_faces = len(mesh.faces)
         # 获取逐次降采样的版本（从 100% 到 50%，每次减少 5%）
@@ -311,34 +370,19 @@ def process_mesh_to_pc(mesh_list, marching_cubes=False, sample_num=4096 ,decreme
         turns = 0
         while turns < times:
             current_faces = int(current_faces - num_faces * decrement)
-            downsampled_face_coord = simplify_mesh(mesh, current_faces)
+            downsampled_face_coord,downsampled_vertices,downsampled_pc_normal = simplify_mesh(mesh, current_faces,sample_num,marching_cubes)
             all_face_coods.append(downsampled_face_coord)
+            all_mesh_list.append(downsampled_vertices)
+            all_pc_normal.append(downsampled_pc_normal)         
             turns += 1  
 
-        '''
-        # 获取降采样的版本（面数减半和减少到四分之一）
-        half_faces = num_faces // 2
-        quarter_faces = num_faces // 4
-
-        # 获取降采样后的 face_coord 并拼接
-        half_face_coord = simplify_mesh(mesh, half_faces)
-        quarter_face_coord = simplify_mesh(mesh, quarter_faces)
-
-        # 将原始和降采样后的 face_coord 进行拼接
-        all_face_coods.append(half_face_coord)
-        all_face_coods.append(quarter_face_coord)
-        '''
         # 拼接成新 tensor，形状为 [降采样数量，面片数量，每个面顶点数，顶点坐标]
         #combined_face_coord = torch.stack(all_face_coods, dim=0)  #[num of downsampletimes，num of face，num of vertice，coord]
         #combined_face_coord = np.stack(all_face_coods, axis=0)
         #print("all_face_coods.len: ",len(all_face_coods))
         face_cood_list.append(all_face_coods)
-
-        # 采样点云并计算法向量
-        points, face_idx = mesh2.sample(sample_num, return_index=True)
-        normals = mesh2.face_normals[face_idx]
-        pc_normal = np.concatenate([points, normals], axis=-1, dtype=np.float16)
-        pc_normal_list.append(pc_normal)
+        return_mesh_list.append(all_mesh_list)
+        pc_normal_list.append(all_pc_normal)
 
         #print("Process mesh success")
 
@@ -371,7 +415,7 @@ def process_mesh_to_pc(mesh_list, marching_cubes = False, sample_num = 4096):
         print("process mesh success")
 
         #face_coord = vertices[faces]  # 形状为 [num_faces, num_vertices_per_face, 3]
-        #face_coord_tensor = torch.tensor(face_coord, dtype=torch.float32)
+        #face_coord_tensor = torch.tensor(face_coord, dtype=torch.float16)
         #face_cood_list.append(face_coord_tensor)
         #print("process facecoods success")
 
@@ -385,7 +429,7 @@ def pad_face_coord_list(face_coord_list):
     
     # 初始化填充后的tensor和mask
     batch_size = len(face_coord_list)
-    padded_face_coord = torch.zeros((batch_size, max_nf, nvf, c), dtype=torch.float32)
+    padded_face_coord = torch.zeros((batch_size, max_nf, nvf, c), dtype=torch.float16)
     mask = torch.zeros((batch_size, max_nf), dtype=torch.bool)
 
     for i, face_coord in enumerate(face_coord_list):
@@ -405,14 +449,14 @@ def pad_face_coord_list(face_coord_list):
     #print("max_nf: ",max_nf)
     # 初始化填充后的tensor和mask
     batch_size = len(face_coord_list)
-    padded_face_coord = torch.zeros((batch_size, num_of_downsampletimes, max_nf, nvf, c), dtype=torch.float32)
+    padded_face_coord = torch.zeros((batch_size, num_of_downsampletimes, max_nf, nvf, c), dtype=torch.float16)
     mask = torch.zeros((batch_size, num_of_downsampletimes, max_nf), dtype=torch.bool)
 
     for i, downsampled_list in enumerate(face_coord_list):
         for j, face_coord in enumerate(downsampled_list):
             nf = face_coord.shape[0]
             # 将np数组转换为torch tensor并填充
-            face_coord_tensor = torch.tensor(face_coord, dtype=torch.float32)
+            face_coord_tensor = torch.tensor(face_coord, dtype=torch.float16)
             padded_face_coord[i, j, :nf] = face_coord_tensor
             mask[i, j, :nf] = True  # 仅标记有效的face部分
 
@@ -467,9 +511,34 @@ def process_shapenet_models(data_dir,k = 800, marching_cubes=False, sample_num=4
 
     padded_face_coord, mask = pad_face_coord_list(face_cood_list)
 
-    point_feature = calc_feature(pc_normal_list, return_mesh_list)
+    downsampletimes = len(pc_normal_list[0])  # 获取降采样次数
+    batch_size = len(pc_normal_list)  # 获取批量大小
+    
+    # 用列表存储每个降采样版本的结果
+    point_features_list = []
+    
+    for i in range(downsampletimes):
+        # 提取每个降采样版本的数据
+        pc_normal_sublist = [pc_normal_list[j][i] for j in range(batch_size)]
+        return_mesh_sublist = [return_mesh_list[j][i] for j in range(batch_size)]
+        
+        # 计算该降采样版本的特征
+        point_feature = calc_feature(pc_normal_sublist, return_mesh_sublist)
+        
+        # 结果添加到列表中
+        point_features_list.append(point_feature)
+    
+    # 堆叠所有降采样版本的特征，得到形状 [b, downsampletimes, 257, dim]
+    point_features = torch.stack(point_features_list, dim=1)
+    point_features = point_features.cpu()
+    point_features = point_features.detach().numpy()
+    padded_face_coord = padded_face_coord.cpu()
+    padded_face_coord = padded_face_coord.detach().numpy()
+    mask = mask.cpu()
+    mask = mask.detach().numpy()
+    #point_feature = calc_feature(pc_normal_list, return_mesh_list)
 
-    return point_feature, padded_face_coord, mask
+    return point_features, padded_face_coord, mask
 
 
 '''

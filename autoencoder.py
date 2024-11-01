@@ -1,37 +1,33 @@
 from functools import wraps
-
 import numpy as np
-
 import torch
-from torch import nn, einsum
+from torch import nn, einsum, Tensor
 import torch.nn.functional as F
-
 from einops import rearrange, repeat
-
 #from torch_cluster import fps
-
 from timm.models.layers import DropPath
-
-from mesh_to_pc import (
-    process_mesh_to_pc,
-    sort_mesh_with_mask,
-
-)
+#from mesh_to_pc import (
+#    process_mesh_to_pc,
+#    sort_mesh_with_mask,
+#)
+from math import ceil, pi, sqrt
 import math
-
 import trimesh
-
 from MeshAnything.miche.michelangelo.models.tsal.inference_utils import extract_geometry
-
 from functools import partial
-
 from MeshAnything.miche.encode import load_model
+from beartype import beartype
+from beartype.typing import Tuple, Callable, List, Dict, Any
+from einops.layers.torch import Rearrange
 
 def exists(val):
     return val is not None
 
 def default(val, d):
     return val if exists(val) else d
+
+def l1norm(t):
+    return F.normalize(t, dim = -1, p = 1)
 
 def cache_fn(f):
     cache = None
@@ -45,6 +41,63 @@ def cache_fn(f):
         cache = f(*args, **kwargs)
         return cache
     return cached_fn
+
+#离散化类
+@beartype
+def discretize(
+    t: Tensor,
+    *,
+    continuous_range: Tuple[float, float],
+    num_discrete: int = 128
+) -> Tensor:
+    lo, hi = continuous_range
+    assert hi > lo
+
+    t = (t - lo) / (hi - lo)
+    t *= num_discrete
+    t -= 0.5
+
+    return t.round().long().clamp(min = 0, max = num_discrete - 1)
+
+@beartype
+def undiscretize(
+    t: Tensor,
+    *,
+    continuous_range = Tuple[float, float],
+    num_discrete: int = 128
+) -> Tensor:
+    lo, hi = continuous_range
+    assert hi > lo
+
+    t = t.float()
+
+    t += 0.5
+    t /= num_discrete
+    return t * (hi - lo) + lo
+
+@beartype
+def gaussian_blur_1d(
+    t: Tensor,
+    *,
+    sigma: float = 1.
+) -> Tensor:
+
+    _, _, channels, device, dtype = *t.shape, t.device, t.dtype
+
+    width = int(ceil(sigma * 5))
+    width += (width + 1) % 2
+    half_width = width // 2
+
+    distance = torch.arange(-half_width, half_width + 1, dtype = dtype, device = device)
+
+    gaussian = torch.exp(-(distance ** 2) / (2 * sigma ** 2))
+    gaussian = l1norm(gaussian)
+
+    kernel = repeat(gaussian, 'n -> c 1 n', c = channels)
+
+    t = rearrange(t, 'b n c -> b c n')
+    out = F.conv1d(t, kernel, padding = half_width, groups = channels)
+    return rearrange(out, 'b c n -> b n c')
 
 # 定义位置编码类
 class Embedder:
@@ -208,18 +261,23 @@ class AutoEncoder(nn.Module):
         word_embed_proj_dim = 768,
         cond_dim = 768,
         num_vertices_per_face = 3,
-        depth_cross = 12,
+        depth_cross = 6,
         d_model = 768,
         max_num_faces = 1000,
+        discretize_size = 128,
+        bin_smooth_blur_sigma = 0.4,
+        coor_continuous_range: Tuple[float, float] = (-1., 1.),
     ):
         super().__init__()
         self.device = torch.device('cuda')
-        self.point_encoder = load_model(ckpt_path="MeshAnything/miche/shapevae-256.ckpt")
+        self.point_encoder = load_model(ckpt_path="/root/data/YYnetPreTrained/shapevae-256.ckpt")
 
         self.num_vertices_per_face = num_vertices_per_face
         self.d_model = d_model
         self.latent_dim = latent_dim
-
+        self.discretize_size = discretize_size
+        self.coor_continuous_range = coor_continuous_range
+        self.bin_smooth_blur_sigma = bin_smooth_blur_sigma # 用于平滑损失的参数。
         # 定义多层交叉注意力
         self.cross_attend_blocks = nn.ModuleList([])
 
@@ -229,10 +287,11 @@ class AutoEncoder(nn.Module):
                 PreNorm(dim, FeedForward(dim))  # 独立的前馈层
         ]))
 
-        #self.cross_attend_blocks = nn.ModuleList([
-        #    PreNorm(dim, Attention(dim, dim, heads = 1, dim_head = dim), context_dim = dim),
-        #    PreNorm(dim, FeedForward(dim))
-        #])
+        # 一个线性层，用于将解码器的输出投影到离散坐标的数量上。
+        self.to_coor_logits = nn.Sequential(
+            nn.Linear(dim, self.discretize_size * self.num_vertices_per_face * 3),
+            Rearrange('... (v c) -> ... v c', v = self.num_vertices_per_face * 3)
+        )
         self.cond_dim = cond_dim
         self.cond_length = cond_length
         self.word_embed_proj_dim = word_embed_proj_dim
@@ -263,12 +322,12 @@ class AutoEncoder(nn.Module):
         #self.mlp_model = MLP((self.codeL * 2 + 1) * self.num_vertices_per_face, 128, 384, dim // 3 )
         self.mlp_model2 = MLP(dim , dim // 4 , dim // 12 , 9)
         self.max_num_faces = max_num_faces
-
-        self.tokens = [[1.1965, -0.1948, -0.6660],
-                        [1.3214,  1.8411,  1.3264],
-                        [-0.5045, -0.0491, -0.8510]]
+        self.tokens = torch.randn(dim, dtype=torch.float16)
+        #self.tokens = [[1.1965, -0.1948, -0.6660],
+        #                [1.3214,  1.8411,  1.3264],
+        #                [-0.5045, -0.0491, -0.8510]]
         self.tokens = nn.Parameter(torch.tensor(self.tokens))
-        print("self.tokens: ",self.tokens)
+        #print("self.tokens: ",self.tokens)
         #self.tokens = nn.Parameter(torch.randn(self.max_num_faces, self.num_vertices_per_face, 3))
         self.position_encoding = self._create_sinusoidal_position_encoding(self.max_num_faces, self.d_model)
         
@@ -307,7 +366,7 @@ class AutoEncoder(nn.Module):
         truncated_position_encoding = self.position_encoding[:num_faces]
 
         truncated_tokens_expanded = truncated_tokens.unsqueeze(0).unsqueeze(0).unsqueeze(0)
-        raw_tokens = torch.zeros((batch_size, num_downsample_times, num_faces, 3, 3), dtype=truncated_tokens.dtype)
+        raw_tokens = torch.zeros((batch_size, num_downsample_times, num_faces, truncated_tokens.shape[0]), dtype=truncated_tokens.dtype)
         raw_tokens = raw_tokens.to(self.device)
         raw_tokens[mask] = truncated_tokens_expanded
 
@@ -318,8 +377,8 @@ class AutoEncoder(nn.Module):
 
         
 
-        raw_tokens = rearrange(raw_tokens,'b nd nf nv c -> b nd nf (nv c)') #[b,nd,nf,9]
-        face_coords = raw_tokens
+        #raw_tokens = rearrange(raw_tokens,'b nd nf nv c -> b nd nf (nv c)') #[b,nd,nf,9]
+        face_coords = raw_tokens  #不用mlp的话这里是 [b,nd,nf,dim]
         face_coords[~mask] = 0
 
         '''
@@ -340,9 +399,9 @@ class AutoEncoder(nn.Module):
 
         face_coor_embed = torch.cat((face_coor_x, face_coor_y, face_coor_z), dim=-1)
         '''
-        face_coor_embed = self.mlp_model(face_coords)
+        #face_coords = self.mlp_model(face_coords)
         raw_position_encoding = raw_position_encoding.to(self.device)
-        face_coor_embed = face_coor_embed + raw_position_encoding
+        face_coor_embed = face_coords + raw_position_encoding
         face_coor_embed[~mask] = 0
 
         #point_feature = self.point_encoder.encode_latents(input_tensor)
@@ -408,12 +467,16 @@ class AutoEncoder(nn.Module):
                 yi = yi * mask[:, i, :].unsqueeze(-1)  # Apply mask
             # Store the result for the current downsample level
             output[:, i, :, :] = yi
-
-        res = self.recon3(output)
+        
+        print("output:", output.requires_grad)
+        res = self.deal_output(latents = output)
+        print("res:", res.requires_grad)
+        #print("resshape :",res.shape)
+        #print("res: ",res)
 
         #res = sort_mesh_with_mask(res , mask)
 
-        return res  # [b, num of downsample, nf, 3 , 3]
+        return res  # Shape: [b, nd, nf, 3, 3, 128]
 
     def forward(self, point_feature, mask):
         
@@ -422,19 +485,17 @@ class AutoEncoder(nn.Module):
         o = self.decode(x, y, mask)
 
         return o
-    '''
-    def forward(self, pc_list, mesh_list, facecood_list , mask ,noise = None):
-        
-        x = self.encode(pc_list, mesh_list,facecood_list , mask)
 
-        if(not exists(noise)):
-            noise = torch.randn(x.shape[0], x.shape[1], self.latent_dim, device=self.device)
+    def deal_output(self,latents):
+        '''
+        latents: [b, nd, nf, dim]
+        '''
+        pred_face_coords = self.to_coor_logits(latents) #[b,nd,nf,9,128]
+        pred_face_coords = rearrange(pred_face_coords, 'b nd nf (v c) d -> b nd nf v c d', v=3, c=3)
+        pred_log_prob = pred_face_coords.log_softmax(dim=-1)  # Shape: [b, nd, nf, 3, 3, 128]
 
-        o = self.decode(noise, context=x,mask = mask)
+        return pred_log_prob
 
-        return {'logits': o}
-    '''
-    
     def recon(self, latents):
 
         geometric_func = partial(self.point_encoder.model.shape_model.query_geometry, latents=latents)
@@ -454,21 +515,25 @@ class AutoEncoder(nn.Module):
         #print("recon_mesh_shape: ",recon_mesh.shape)
         return recon_mesh
     
-    def recon2(self, latents):
+    def recon2(self, latents, mask): #解离散
         """
-        latents: tensor of shape (b, nf, dim)
-        
-        Returns a tensor of shape (b, nf, 3, 3) representing the triangles.
+        latents: tensor of shape (b, nd, nf, dim)
+        mask: tensor of shape (b, nd, nf)
+        Returns a tensor of shape (b, nd, nf, 3, 3) representing the triangles.
         """ 
-        batch_size, num_faces, dim = latents.shape  
+        pred_face_coords = self.to_coor_logits(latents) #[b,nd,nf,9,128]
+        pred_face_coords = pred_face_coords.argmax(dim = -1) #[b,nd,nf,9]
+        pred_face_coords = rearrange(pred_face_coords, '... (v c) -> ... v c', v = self.num_vertices_per_face) #[b,nd,nf,3,3]
+        continuous_coors = undiscretize( #[b,nd,nf,3,3]
+            pred_face_coords,
+            num_discrete = self.discretize_size,
+            continuous_range = self.coor_continuous_range
+        )
+        continuous_coors = continuous_coors.masked_fill(~rearrange(mask, 'b nd nf -> b nd nf 1 1'), float('nan')) #[b,nd,nf,3,3]
+        
+        return continuous_coors
 
-        projected_logits = self.mlp_model2(latents) 
-
-        triangles = projected_logits.view(batch_size, num_faces, 3, 3)
-
-        return triangles
-
-    def recon3(self, latents):
+    def recon3(self, latents):     #解连续
         """
         latents: tensor of shape (b, nd, nf, dim)
         

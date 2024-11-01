@@ -8,14 +8,7 @@ from mesh_to_pc import (
 )
 from dataread import GLBDataset
 
-batch_size = 16
 
-pkl_file_path =  '/root/data/YYnetdata/20241009_010626/dataset.pkl'
-
-dataset = GLBDataset.load_dataset(pkl_file_path)
-dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-
-savepath = "/root/data/YYnetrebuild/v1"
 # 假设已经定义好了你的 dataloader, rebuild_3d_model 函数
 
 # 定义保存 3D 模型的函数

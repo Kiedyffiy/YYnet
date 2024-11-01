@@ -4,7 +4,7 @@ from torch.utils.data import Dataset, DataLoader
 from mesh_to_pc import process_shapenet_models
 import pickle
 from datetime import datetime
-import open3d as o3d
+#import open3d as o3d
 import trimesh
 
 class GLBDataset(Dataset):
