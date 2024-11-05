@@ -261,7 +261,7 @@ class AutoEncoder(nn.Module):
         word_embed_proj_dim = 768,
         cond_dim = 768,
         num_vertices_per_face = 3,
-        depth_cross = 6,
+        depth_cross = 12,
         d_model = 768,
         max_num_faces = 1000,
         discretize_size = 128,
@@ -322,7 +322,7 @@ class AutoEncoder(nn.Module):
         #self.mlp_model = MLP((self.codeL * 2 + 1) * self.num_vertices_per_face, 128, 384, dim // 3 )
         self.mlp_model2 = MLP(dim , dim // 4 , dim // 12 , 9)
         self.max_num_faces = max_num_faces
-        self.tokens = torch.randn(dim, dtype=torch.float16)
+        self.tokens = torch.randn(dim, dtype=torch.float32)
         #self.tokens = [[1.1965, -0.1948, -0.6660],
         #                [1.3214,  1.8411,  1.3264],
         #                [-0.5045, -0.0491, -0.8510]]
@@ -363,13 +363,17 @@ class AutoEncoder(nn.Module):
         batch_size, num_downsample_times, num_faces = mask.shape
 
         truncated_tokens = self.tokens
+        truncated_tokens = truncated_tokens.to(self.device)
         truncated_position_encoding = self.position_encoding[:num_faces]
-
+        '''
+        truncated_tokens_expanded = truncated_tokens.unsqueeze(0).unsqueeze(0)
+        raw_tokens = truncated_tokens_expanded.repeat(batch_size, num_downsample_times, 1, 1)
+        '''
         truncated_tokens_expanded = truncated_tokens.unsqueeze(0).unsqueeze(0).unsqueeze(0)
         raw_tokens = torch.zeros((batch_size, num_downsample_times, num_faces, truncated_tokens.shape[0]), dtype=truncated_tokens.dtype)
         raw_tokens = raw_tokens.to(self.device)
         raw_tokens[mask] = truncated_tokens_expanded
-
+        
         #raw_tokens = truncated_tokens.unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(batch_size, num_downsample_times, num_faces, -1, -1) #[b,nd,nf,3,3]
         #raw_tokens = raw_tokens.to(self.device)
 
@@ -468,9 +472,7 @@ class AutoEncoder(nn.Module):
             # Store the result for the current downsample level
             output[:, i, :, :] = yi
         
-        print("output:", output.requires_grad)
         res = self.deal_output(latents = output)
-        print("res:", res.requires_grad)
         #print("resshape :",res.shape)
         #print("res: ",res)
 
@@ -485,17 +487,25 @@ class AutoEncoder(nn.Module):
         o = self.decode(x, y, mask)
 
         return o
-
+    
     def deal_output(self,latents):
         '''
         latents: [b, nd, nf, dim]
         '''
         pred_face_coords = self.to_coor_logits(latents) #[b,nd,nf,9,128]
+        pred_face_coords = rearrange(pred_face_coords, 'b ... d -> b d (...)')
+        pred_log_prob = pred_face_coords.log_softmax(dim=1)  # Shape: [b, 128 ,(nd, nf, 3, 3)]
+
+        return pred_log_prob
+    '''
+    def deal_output(self,latents):
+
+        pred_face_coords = self.to_coor_logits(latents) #[b,nd,nf,9,128]
         pred_face_coords = rearrange(pred_face_coords, 'b nd nf (v c) d -> b nd nf v c d', v=3, c=3)
         pred_log_prob = pred_face_coords.log_softmax(dim=-1)  # Shape: [b, nd, nf, 3, 3, 128]
 
         return pred_log_prob
-
+    '''
     def recon(self, latents):
 
         geometric_func = partial(self.point_encoder.model.shape_model.query_geometry, latents=latents)

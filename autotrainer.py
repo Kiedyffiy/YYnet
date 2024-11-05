@@ -16,6 +16,7 @@ from rebuild import (
     export_models,
     export_cpmodels
 )
+from einops import rearrange, repeat, reduce, pack, unpack
 import os
 import math
 class AutoTrainer(nn.Module):
@@ -29,6 +30,7 @@ class AutoTrainer(nn.Module):
         batch_size=16, 
         test_size = 32,
         bin_smooth_blur_sigma = 0.4,
+        discretize_size = 128,
         savepath = None,
         modelsavepath = None,
         device = torch.device('cuda'),
@@ -38,6 +40,7 @@ class AutoTrainer(nn.Module):
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         self.accelerator = Accelerator(kwargs_handlers=[ddp_kwargs], mixed_precision="fp16") #,gradient_accumulation_steps=4
         self.bin_smooth_blur_sigma = bin_smooth_blur_sigma
+        self.discretize_size = discretize_size
         self.model = model
         self.dataset = dataset
         self.test_dataset = test_dataset
@@ -129,6 +132,16 @@ class AutoTrainer(nn.Module):
 
         return loss
 
+    def compute_dis_loss(self, pred, target, mask):
+
+        recon_losses = (-target * pred).sum(dim = 1)
+
+        mask1 = rearrange(mask,'b nd nf -> b (nd nf)')
+        mask1 = repeat(mask1,'b n ->b (n r)', r = 3 * 3)
+
+        recon_loss = recon_losses[mask1].mean()
+
+        return recon_loss
     
     def train_step(self, batch):
         point_feature, face_coords, mask = batch
@@ -140,7 +153,7 @@ class AutoTrainer(nn.Module):
         total_loss = 0.0
         total_size = 0
         for i in range(dst):
-            point_feature1 = point_feature[:,i,:,:]
+            point_feature1 = point_feature[:,0,:,:]
             face_coords1 = face_coords[:,i:i+1,:,:,:]
             mask1 = mask[:,i:i+1,:]
             self.optimizer.zero_grad()
@@ -148,10 +161,12 @@ class AutoTrainer(nn.Module):
             pred_triangles = self.forward(point_feature1, mask1)
 
             # 计算set loss
-            print("pred_triangles.requires_grad:", pred_triangles.requires_grad)
+            #print("pred_triangles.requires_grad:", pred_triangles.requires_grad)
             target1 = self.calc_target(face_coords1,pred_triangles)
-            loss = self.compute_masked_loss(pred_triangles, target1, mask1)
-
+            #print("pred_triangles: ",pred_triangles)
+            #print("target1: ",target1)
+            loss = self.compute_dis_loss(pred_triangles, target1, mask1)
+            
             self.accelerator.backward(loss)  # 使用accelerator处理反向传播
 
             self.optimizer.step()
@@ -186,12 +201,12 @@ class AutoTrainer(nn.Module):
                 print(f'Epoch [{epoch+1}/{self.epochs}], Loss: {gather_epoch_loss.sum().item()/gather_total_batchSize.sum().item():.4f}, Total_Sap: {gather_total_batchSize.sum().item()}')
             #print(f'Epoch [{epoch+1}/{self.epochs}], Loss: {epoch_loss/len(self.train_dataloader):.4f}')
                     # 每10个epoch保存一次checkpoint
-            if (epoch + 1) % 5 == 0:
-                self.evaluate()
-            if (epoch + 1) % 10 == 0:
-                checkpoint_path = self.savepath / f"checkpoint_epoch_{epoch+1}_loss_{gather_epoch_loss.sum().item()/gather_total_batchSize.sum().item():.4f}.pt"
-                print("save checkpoint!")
-                self.save(checkpoint_path)
+            #if (epoch + 1) % 5 == 0:
+                #self.evaluate()
+            #if (epoch + 1) % 10 == 0:
+                #checkpoint_path = self.savepath / f"checkpoint_epoch_{epoch+1}_loss_{gather_epoch_loss.sum().item()/gather_total_batchSize.sum().item():.4f}.pt"
+                #print("save checkpoint!")
+                #self.save(checkpoint_path)
 
     
     def evaluate(self):
@@ -237,16 +252,17 @@ class AutoTrainer(nn.Module):
     def calc_target(self, face_coordinates, pred_log_prob):
         '''
         face_coordinates [b, nd, nf, 3, 3] - ground truth continuous coordinates
-        pred_log_prob  Shape: [b, nd, nf, 3, 3, 128]
+        pred_log_prob  Shape: [b, 128 ,(nd, nf, 3, 3)]
         '''
         target_discretized = ((face_coordinates - face_coordinates.min()) / 
                               (face_coordinates.max() - face_coordinates.min()) * (self.discretize_size - 1)).long()
-        target_one_hot = torch.zeros_like(pred_log_prob).scatter_(-1, target_discretized.unsqueeze(-1), 1.)
+        target_discretized = rearrange(target_discretized,'b ... -> b 1 (...)')
+        target_one_hot = torch.zeros_like(pred_log_prob).scatter_(1, target_discretized, 1.)
 
         # Apply Gaussian blur if bin_smooth_blur_sigma >= 0
         if self.bin_smooth_blur_sigma > 0:
             target_one_hot = gaussian_blur_1d(target_one_hot, sigma=self.bin_smooth_blur_sigma)        
-        return target_one_hot #Shape: [b, nd, nf, 3, 3, 128]
+        return target_one_hot #Shape: [b, 128 ,(nd, nf, 3, 3)]
     '''
     def compute_set_loss(self, pred_triangles, target_triangles):  # Hungarian
         batch_size, num_faces, num_vertices, _ = pred_triangles.shape
