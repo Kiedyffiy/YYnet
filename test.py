@@ -27,7 +27,10 @@ import random
 
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-shapenet_data_dir = '/root/data/ShapeNetCore.v2/03001627'
+shapenet_data_dir = '/root/data/ShapeNetCore.v2'
+
+category_list = ["table","bench","tower","lamp","bed","chair"]#
+
 save_path1 = '/root/data/YYnetcheck'
 
 save_path1 = os.path.join(save_path1,timestamp)
@@ -38,26 +41,37 @@ save_path3 = Path(save_path1) / f"trainres.pt"
 
 save_path4 = "/root/data/YYnetrebuild"
 
-pkl_file_path =  '/root/data/YYnetdata/20241031_120613/dataset.pkl'
+pkl_file_path =  '/root/data/YYnetdata/20241128_165204/dataset.pkl'
+#pkl_file_path =  '/root/data/YYnetdata/20241112_115726/dataset.pkl'
 print("start process loaddata!")
 
 dataset = GLBDataset.load_dataset(pkl_file_path)
-#dataset = GLBDataset(datapath = shapenet_data_dir , k = 800 ,marching_cubes=False, save_path = save_path2)
+#dataset = GLBDataset(datapath = shapenet_data_dir, category_list = category_list , k = 900 ,marching_cubes=False, save_path = save_path2)
 
 dataset.info()
+
+print(dataset.__len__())
+
+#dataset.shuffle_dataset()
 
 print("process_shapenet_finished!")
 
 
-dataset1, dataset2 = random_split(dataset, [len(dataset) - 1, 1])
-#subset2_indices = dataset2.indices
-#torch.save({'subset2_indices': subset2_indices}, '/root/data/YYnetdata/small/subsets_indices4.pth')
-#print("have save subsets_indices!")
+'''
 
+dataset1, dataset2 = random_split(dataset, [128, len(dataset) - 128])
+subset2_indices = dataset2.indices
+torch.save({'subset2_indices': subset2_indices}, '/root/data/YYnetdata/small/subsets_indices3.pth')
+print("have save subsets_indices!")
 
 '''
 
-checkpoint = torch.load('/root/data/YYnetdata/small/subsets_indices4.pth')
+
+
+torch.cuda.empty_cache()
+
+
+checkpoint = torch.load('/root/data/YYnetdata/small/subsets_indices3.pth')
 dataset2 = torch.utils.data.Subset(dataset, checkpoint['subset2_indices'])
 print("have load subsets_indices!")
 
@@ -67,31 +81,31 @@ subset2_indices = set(checkpoint['subset2_indices'])
 all_indices = set(range(len(dataset)))
 # 获取 subset1 的索引 (即不在 subset2 中的索引)
 subset1_indices = list(all_indices - subset2_indices)
-if len(subset1_indices) < 32:
-    raise ValueError("subset1_indices 的样本数量不足 32 个")
-subset1_sample_indices = random.sample(subset1_indices, 32)
+if len(subset1_indices) < 64:
+    raise ValueError("subset1_indices 的样本数量不足 64 个")
+subset1_sample_indices = random.sample(subset1_indices, 64)
 # 创建 subset1
 dataset1 = torch.utils.data.Subset(dataset, subset1_sample_indices)
 
-'''
 
-batch_size = 1
-epochs = 300
+
+
+batch_size = 32
+epochs = 500
 
 model = AutoEncoder()
 #model.to(model.device)
 
 
-trainer = AutoTrainer(model=model, dataset=dataset2,test_dataset = dataset1,lr = 1e-4, batch_size=batch_size, epochs=epochs,savepath=save_path1,modelsavepath=save_path4)
-#trainer.load("/root/data/YYnetcheck/20241029_151314/checkpoint_epoch_70.pt")
-trainer.train()
+trainer = AutoTrainer(model=model, dataset=dataset2,test_dataset = dataset1,lr = 1e-5, batch_size=batch_size, epochs=epochs,savepath=save_path1,modelsavepath=save_path4)
+trainer.load("/root/data/YYnetcheck/20241127_104440/checkpoint_epoch_220_loss_0.4715.pt")
+#trainer.train()
 
 #trainer.save(save_path3)
 
-#trainer.evaluate()
+trainer.evaluate(is_recon = True)
 
 print("Training completed successfully!")
-
 
 
 

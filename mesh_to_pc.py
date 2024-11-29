@@ -2,6 +2,7 @@ import mesh2sdf.core
 import numpy as np
 import skimage.measure
 import trimesh
+import json
 import os
 import torch
 from collections import OrderedDict
@@ -15,7 +16,7 @@ from beartype.typing import Tuple
 point_encoder = load_model(ckpt_path="/root/data/YYnetPreTrained/shapevae-256.ckpt")
 device = torch.device('cuda')
 coor_continuous_range: Tuple[float, float] = (-1., 1.)
-
+folder_model_mapping_path = "/root/src/meshgpt-pytorch-main/folder_model_mapping.json"
 # 加载ShapeNet模型
 def load_shapenet_model(file_path):
     mesh = trimesh.load(file_path)
@@ -76,7 +77,7 @@ def export_to_watertight(normalized_mesh, octree_depth: int = 7):
     #print("face_coord_shape: ",face_coord.shape)
     return mesh  #, face_coord
 
-def calc_feature(pc_list,mesh_list,batch_size=64):
+def calc_feature(pc_list,mesh_list,batch_size=32):
         normalized_pc_normal_list = []
         print("start calc feature!")
         for pc_normal, vertices in tqdm(zip(pc_list, mesh_list), total=len(pc_list), desc="Processing"):
@@ -308,11 +309,11 @@ def get_facecood(mesh, normalize=True):
         scale_factor = None
     
     face_coords = vertices[mesh.faces]   #你真的是Tensor吗 #no
-    dis_face_coords = discretize(torch.tensor(face_coords),continuous_range=coor_continuous_range,num_discrete=128) #离散化
-    dis_face_coords = undiscretize(dis_face_coords,continuous_range=coor_continuous_range,num_discrete=128) #解离散化
+    #dis_face_coords = discretize(torch.tensor(face_coords),continuous_range=coor_continuous_range,num_discrete=128) #离散化
+    #dis_face_coords = undiscretize(dis_face_coords,continuous_range=coor_continuous_range,num_discrete=128) #解离散化
     #face_coord_tensor = torch.tensor(face_coords, dtype=torch.float16)
     #print(f"Face coordinates shape: {face_coord_tensor.shape}")
-    return dis_face_coords
+    return face_coords #dis_face_coords
     #return face_coord_tensor
 
 
@@ -388,57 +389,7 @@ def process_mesh_to_pc(mesh_list, marching_cubes=False, sample_num=4096 ,decreme
 
     return pc_normal_list, return_mesh_list, face_cood_list
 
-'''
-def process_mesh_to_pc(mesh_list, marching_cubes = False, sample_num = 4096):
-    # mesh_list : list of trimesh
-    pc_normal_list = []
-    return_mesh_list = []
-    face_cood_list = []
-    for mesh in mesh_list:
 
-        #vertices = mesh.vertices  # 顶点数组，形状为 [num_vertices, 3]
-        #faces = mesh.faces  # 面数组，形状为 [num_faces, num_vertices_per_face]
-        face_coord = get_facecood(mesh)
-        face_cood_list.append(face_coord)
-
-        if marching_cubes:
-            mesh= export_to_watertight(mesh)   # , face_cood 
-            #face_cood_list.append(face_cood)
-            print("MC over!")
-        return_mesh_list.append(mesh)
-        
-        points, face_idx = mesh.sample(sample_num, return_index=True)
-        normals = mesh.face_normals[face_idx]
-
-        pc_normal = np.concatenate([points, normals], axis=-1, dtype=np.float16)
-        pc_normal_list.append(pc_normal)
-        print("process mesh success")
-
-        #face_coord = vertices[faces]  # 形状为 [num_faces, num_vertices_per_face, 3]
-        #face_coord_tensor = torch.tensor(face_coord, dtype=torch.float16)
-        #face_cood_list.append(face_coord_tensor)
-        #print("process facecoods success")
-
-    return pc_normal_list, return_mesh_list, face_cood_list
-'''
-'''
-def pad_face_coord_list(face_coord_list):
-    # 找出最大的nf
-    max_nf = max(face_coord.shape[0] for face_coord in face_coord_list)
-    nvf, c = face_coord_list[0].shape[1], face_coord_list[0].shape[2]  # nvf和c是相同的
-    
-    # 初始化填充后的tensor和mask
-    batch_size = len(face_coord_list)
-    padded_face_coord = torch.zeros((batch_size, max_nf, nvf, c), dtype=torch.float16)
-    mask = torch.zeros((batch_size, max_nf), dtype=torch.bool)
-
-    for i, face_coord in enumerate(face_coord_list):
-        nf = face_coord.shape[0]
-        padded_face_coord[i, :nf] = face_coord  # 填充
-        mask[i, :nf] = True  # 仅标记有效的face部分
-
-    return padded_face_coord, mask
-'''
 def pad_face_coord_list(face_coord_list):
     # 找出最大的降采样次数和最大的nf
     print("pad_face_coord start!!")
@@ -466,29 +417,8 @@ def pad_face_coord_list(face_coord_list):
 
 # 处理ShapeNet模型并生成点云
 # todo 适应数据结构
+
 '''
-def process_shapenet_models(data_dir,k = 800, marching_cubes=False, sample_num=4096):
-    mesh_list = []
-    for root, dirs, files in os.walk(data_dir):
-        for file in files:
-            if file.endswith('.obj') or file.endswith('.off') or file.endswith('.glb'):
-                file_path = os.path.join(root, file)
-                mesh = load_shapenet_model(file_path)
-
-                # 检查面数是否超过阈值k
-                if len(mesh.faces) > k:
-                    print(f"Skipping {file} as it has {len(mesh.faces)} faces, which exceeds the threshold of {k}.")
-                    continue 
-
-                mesh_list.append(mesh)
-    
-    pc_normal_list, return_mesh_list,face_cood_list = process_mesh_to_pc(mesh_list, marching_cubes = marching_cubes, sample_num = sample_num)
-
-    padded_face_coord, mask = pad_face_coord_list(face_cood_list)
-
-    return pc_normal_list, return_mesh_list, padded_face_coord, mask
-'''
-
 def process_shapenet_models(data_dir,k = 800, marching_cubes=False, sample_num=4096):
     mesh_list = []
     for model_name in os.listdir(data_dir):
@@ -506,10 +436,58 @@ def process_shapenet_models(data_dir,k = 800, marching_cubes=False, sample_num=4
             except Exception as e:
                 print(f'处理模型 {model_path} 时出错: {e}')
     print("Generate meshlist successfully! len of list : ",len(mesh_list))
+'''
+def process_shapenet_models(data_dir, category_list, k=800, marching_cubes=False, sample_num=4096):
+    # Load the folder model mapping
+    with open(folder_model_mapping_path, 'r') as f:
+        folder_model_mapping = json.load(f)
 
-    pc_normal_list, return_mesh_list,face_cood_list = process_mesh_to_pc(mesh_list, marching_cubes = marching_cubes, sample_num = sample_num)
+    # Create a reverse mapping from names to folder IDs
+    name_to_folder = {}
+    for folder_id, names in folder_model_mapping.items():
+        # Use the full names string as the key without splitting
+        name_to_folder[names.strip()] = folder_id
+
+    # Filter folder IDs based on the given category_list
+    selected_folders = set()
+    for category in category_list:
+        if category in name_to_folder:
+            selected_folders.add(name_to_folder[category])
+        else:
+            print(f"Warning: Category '{category}' not found in mapping.")
+
+    mesh_list = []
+    # Process each subdirectory that matches the selected folders
+    for folder_id in selected_folders:
+        folder_path = os.path.join(data_dir, folder_id)
+        print("deal with data path: ",folder_path)
+        if not os.path.exists(folder_path):
+            print(f"Warning: Folder '{folder_path}' does not exist.")
+            continue
+
+        for model_name in os.listdir(folder_path):
+            model_path = os.path.join(folder_path, model_name, 'models', 'model_normalized.obj')
+            if os.path.exists(model_path):
+                if os.path.getsize(model_path) > 1 * 1024 * 1024:
+                    continue
+                try:
+                    mesh = load_shapenet_model(model_path)
+
+                    if len(mesh.faces) > k:
+                        continue
+                    if len(mesh.faces) < 800:  #临时修改
+                        continue
+                    mesh_list.append(mesh)
+                except Exception as e:
+                    print(f'Error processing model {model_path}: {e}')
+
+    print("Generate meshlist successfully! len of list:", len(mesh_list))
+
+    pc_normal_list, return_mesh_list, face_cood_list = process_mesh_to_pc(mesh_list, marching_cubes = marching_cubes, sample_num = sample_num)
 
     padded_face_coord, mask = pad_face_coord_list(face_cood_list)
+
+    '''
 
     downsampletimes = len(pc_normal_list[0])  # 获取降采样次数
     batch_size = len(pc_normal_list)  # 获取批量大小
@@ -532,13 +510,14 @@ def process_shapenet_models(data_dir,k = 800, marching_cubes=False, sample_num=4
     point_features = torch.stack(point_features_list, dim=1)
     point_features = point_features.cpu()
     point_features = point_features.detach().numpy()
+    '''
     padded_face_coord = padded_face_coord.cpu()
     padded_face_coord = padded_face_coord.detach().numpy()
     mask = mask.cpu()
     mask = mask.detach().numpy()
     #point_feature = calc_feature(pc_normal_list, return_mesh_list)
-
-    return point_features, padded_face_coord, mask
+    
+    return pc_normal_list, return_mesh_list, padded_face_coord, mask
 
 
 '''

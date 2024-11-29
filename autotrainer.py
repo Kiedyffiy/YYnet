@@ -8,6 +8,10 @@ from autoencoder import (
     AutoEncoder,
     gaussian_blur_1d
 )
+from pytorch_custom_utils import (
+    get_adam_optimizer,
+    OptimizerWithWarmupSchedule
+)
 from scipy.optimize import linear_sum_assignment  # Hungarian算法
 from tqdm.auto import tqdm
 from accelerate.utils import DistributedDataParallelKwargs
@@ -16,9 +20,16 @@ from rebuild import (
     export_models,
     export_cpmodels
 )
+from torch.optim.lr_scheduler import _LRScheduler
+from beartype.typing import Optional, Tuple, Type, List
 from einops import rearrange, repeat, reduce, pack, unpack
+from torch.optim.lr_scheduler import CosineAnnealingLR
 import os
 import math
+from autoencoder import(
+    undiscretize,
+    discretize
+)
 class AutoTrainer(nn.Module):
     def __init__(
         self, 
@@ -33,7 +44,14 @@ class AutoTrainer(nn.Module):
         discretize_size = 128,
         savepath = None,
         modelsavepath = None,
+        scheduler: Type[_LRScheduler] | None = None,
+        warmup_steps = 10,
+        weight_decay: float = 1e-4,
+        optimizer_kwargs: dict = dict(),
+        max_grad_norm: float | None = None,
+        scheduler_kwargs: dict = dict(),
         device = torch.device('cuda'),
+        coor_continuous_range: Tuple[float, float] = (-1., 1.),
     ):
         super().__init__()
         # 使用Accelerator处理
@@ -41,6 +59,7 @@ class AutoTrainer(nn.Module):
         self.accelerator = Accelerator(kwargs_handlers=[ddp_kwargs], mixed_precision="fp16") #,gradient_accumulation_steps=4
         self.bin_smooth_blur_sigma = bin_smooth_blur_sigma
         self.discretize_size = discretize_size
+        self.coor_continuous_range = coor_continuous_range
         self.model = model
         self.dataset = dataset
         self.test_dataset = test_dataset
@@ -52,16 +71,44 @@ class AutoTrainer(nn.Module):
         #self.test_size = test_size
         #self.train_dataset, self.test_dataset = random_split(dataset, [self.train_size, self.test_size])
         self.train_dataset = dataset
-        self.train_dataloader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True ,drop_last=False)
-        self.test_dataloader = DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False ,drop_last=True)
+        self.train_dataloader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True ,drop_last=True)
+        self.test_dataloader = DataLoader(self.test_dataset, batch_size=16, shuffle=False ,drop_last=True)
         #self.dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-        self.optimizer = optim.Adam(model.parameters(), lr=lr)
+        '''
+        self.optimizer = optim.AdamW(
+                            model.parameters(),
+                            lr=lr,            # 初始学习率
+                            weight_decay=1e-4,  # 权重衰减系数
+                            betas=(0.9, 0.999), # 动量超参数
+                            eps=1e-8,           # 数值稳定项
+                            amsgrad=True       # 是否使用 AMSGrad
+                            )
+        '''
+        '''
+        self.optimizer = optim.SGD(
+                            model.parameters(),
+                            lr=lr,             # 初始学习率
+                            momentum=0.9,        # 动量系数
+                            weight_decay=1e-4    # 权重衰减系数
+                            )
+        
+        '''
+        self.optimizer = OptimizerWithWarmupSchedule(
+            accelerator = self.accelerator,
+            optimizer = get_adam_optimizer(model.parameters(), lr = lr, wd = weight_decay, **optimizer_kwargs),
+            scheduler = scheduler,
+            scheduler_kwargs = scheduler_kwargs,
+            warmup_steps = warmup_steps,
+            max_grad_norm = max_grad_norm
+        )
+        
+        #self.scheduler = CosineAnnealingLR(self.optimizer, T_max=100, eta_min=1e-5)
         self.criterion = nn.MSELoss()
         self.savepath = Path(savepath)
         self.modelsavepath = modelsavepath
         # 将模型、优化器和数据加载器交给accelerator进行处理 , self.test_dataloader
-        self.model, self.optimizer, self.train_dataloader,self.test_dataloader = self.accelerator.prepare(
-            self.model, self.optimizer, self.train_dataloader,self.test_dataloader
+        self.model, self.train_dataloader,self.test_dataloader = self.accelerator.prepare(
+            self.model, self.train_dataloader,self.test_dataloader
         )
 
     def save(self, path, overwrite=True):
@@ -103,8 +150,8 @@ class AutoTrainer(nn.Module):
         self.model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
         
         # 手动调整学习率
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = self.lr
+        #for param_group in self.optimizer.param_groups:
+        #    param_group['lr'] = self.lr
         
         print("Load checkpoint successfully!")
         print("self.model.tokens: ", self.accelerator.unwrap_model(self.model).tokens)
@@ -143,7 +190,7 @@ class AutoTrainer(nn.Module):
 
         return recon_loss
     
-    def train_step(self, batch):
+    def train_step(self, batch):  #此处的point_feature应该为未encode的normalized_pc_normal_array
         point_feature, face_coords, mask = batch
         #print("point_feature shape:",point_feature.shape)
         #point_feature = torch.tensor(point_feature)
@@ -153,7 +200,7 @@ class AutoTrainer(nn.Module):
         total_loss = 0.0
         total_size = 0
         for i in range(dst):
-            point_feature1 = point_feature[:,0,:,:]
+            point_feature1 = point_feature[:,i,:,:]
             face_coords1 = face_coords[:,i:i+1,:,:,:]
             mask1 = mask[:,i:i+1,:]
             self.optimizer.zero_grad()
@@ -192,6 +239,8 @@ class AutoTrainer(nn.Module):
                 total_batchSize += batchSize
                 progress_bar.set_postfix({'Loss': loss})
 
+            #self.scheduler.step()
+
             epoch_loss_tensor = torch.tensor(epoch_loss, device=self.device)
             total_batchSize_tensor = torch.tensor(total_batchSize, device=self.device)
             gather_epoch_loss = self.accelerator.gather(epoch_loss_tensor)
@@ -201,15 +250,15 @@ class AutoTrainer(nn.Module):
                 print(f'Epoch [{epoch+1}/{self.epochs}], Loss: {gather_epoch_loss.sum().item()/gather_total_batchSize.sum().item():.4f}, Total_Sap: {gather_total_batchSize.sum().item()}')
             #print(f'Epoch [{epoch+1}/{self.epochs}], Loss: {epoch_loss/len(self.train_dataloader):.4f}')
                     # 每10个epoch保存一次checkpoint
-            #if (epoch + 1) % 5 == 0:
-                #self.evaluate()
-            #if (epoch + 1) % 10 == 0:
-                #checkpoint_path = self.savepath / f"checkpoint_epoch_{epoch+1}_loss_{gather_epoch_loss.sum().item()/gather_total_batchSize.sum().item():.4f}.pt"
-                #print("save checkpoint!")
-                #self.save(checkpoint_path)
+            if (epoch + 1) % 2 == 0:
+                self.evaluate()
+            if (epoch + 1) % 10 == 0:
+                checkpoint_path = self.savepath / f"checkpoint_epoch_{epoch+1}_loss_{gather_epoch_loss.sum().item()/gather_total_batchSize.sum().item():.4f}.pt"
+                print("save checkpoint!")
+                self.save(checkpoint_path)
 
     
-    def evaluate(self):
+    def evaluate(self,is_recon = False):  #此处的point_feature应该为未encode的normalized_pc_normal_array
         self.model.eval()  # 评估模式
         total_loss = 0.0
         total_samples = 0
@@ -218,24 +267,34 @@ class AutoTrainer(nn.Module):
         with torch.no_grad():
             for batch in self.test_dataloader:
                 point_feature, face_coords, mask = batch
-                point_feature = point_feature[:,0,:,:]
-                face_coords = face_coords[:,0:1,:,:,:]
-                mask = mask[:,0:1,:]
-                # 前向传播
-                pred_triangles = self.forward(point_feature, mask)
-
-                # 计算损失
-                loss = self.compute_masked_loss(pred_triangles, face_coords, mask)
-
-                # 累积损失和样本数量
-                total_loss += loss.item() * pred_triangles.shape[0]  # 乘以batch中的样本数
-                total_samples += pred_triangles.shape[0]
+                dst = mask.shape[1]
+                final_pred_facecoords = []
+                for i in range(dst):
+                    point_feature1 = point_feature[:,i,:,:]
+                    face_coords1 = face_coords[:,i:i+1,:,:,:]
+                    mask1 = mask[:,i:i+1,:]
+                    # 前向传播
+                    pred_triangles = self.forward(point_feature1, mask1)
+                    target = self.calc_target(face_coords1,pred_triangles)
+                    if is_recon :
+                        pred_facecoords = self.model.module.recon_forward(point_feature1, mask1)
+                        final_pred_facecoords.append(pred_facecoords)        
+                    # 计算损失
+                    #loss = self.compute_masked_loss(pred_triangles, face_coords, mask)
+                    loss = self.compute_dis_loss(pred_triangles, target, mask1)
+                    # 累积损失和样本数量
+                    total_loss += loss.item() * pred_triangles.shape[0]  # 乘以batch中的样本数
+                    total_samples += pred_triangles.shape[0]
 
                 #重建模型
-                current_device = torch.cuda.current_device()
-                save_dir = os.path.join(self.modelsavepath,f"v4")
-                #export_cpmodels(pred_triangles,face_coords,mask,save_dir)
-                #print(f"export finish! GPU: {current_device}")
+                if is_recon :
+                    final_pred_facecoords = torch.cat(final_pred_facecoords, dim=1)
+                    dis_face_coords = discretize(torch.tensor(face_coords),continuous_range=self.coor_continuous_range,num_discrete=self.discretize_size)
+                    dis_face_coords = undiscretize(dis_face_coords,continuous_range=self.coor_continuous_range,num_discrete=self.discretize_size) #解离散化
+                    current_device = torch.cuda.current_device()
+                    save_dir = os.path.join(self.modelsavepath,f"v5")
+                    export_cpmodels(final_pred_facecoords,dis_face_coords,mask,save_dir)
+                    print(f"export finish! GPU: {current_device}")
 
         # 计算平均损失
         total_loss_tensor = torch.tensor(total_loss, device=self.device)

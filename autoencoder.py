@@ -254,14 +254,14 @@ class AutoEncoder(nn.Module):
         heads=8,
         dim_head=64,
         weight_tie_layers=False,
-        depth=12,
+        depth=2,
         output_dim = 768,
         decoder_ff=True,    
         cond_length = 257,
         word_embed_proj_dim = 768,
         cond_dim = 768,
         num_vertices_per_face = 3,
-        depth_cross = 12,
+        depth_cross = 6,
         d_model = 768,
         max_num_faces = 1000,
         discretize_size = 128,
@@ -300,7 +300,7 @@ class AutoEncoder(nn.Module):
 
         #self.decoder_ff = PreNorm(latent_dim, FeedForward(latent_dim)) if decoder_ff else None
         #self.decoder_cross_attn = PreNorm(latent_dim, Attention(latent_dim, dim, heads = 1, dim_head = dim), context_dim = dim)
-        '''
+        
         get_latent_attn = lambda: PreNorm(dim, Attention(dim, dim, heads=heads, dim_head=dim_head, drop_path_rate=0.1))
         get_latent_ff = lambda: PreNorm(dim, FeedForward(dim, drop_path_rate=0.1))
         get_latent_attn, get_latent_ff = map(cache_fn, (get_latent_attn, get_latent_ff))
@@ -313,7 +313,7 @@ class AutoEncoder(nn.Module):
                 get_latent_attn(**cache_args),
                 get_latent_ff(**cache_args)
             ]))
-        '''
+        
         #self.to_outputs = nn.Linear(latent_dim, output_dim) if output_dim else nn.Identity()
 
         #self.codeL = 10
@@ -322,11 +322,12 @@ class AutoEncoder(nn.Module):
         #self.mlp_model = MLP((self.codeL * 2 + 1) * self.num_vertices_per_face, 128, 384, dim // 3 )
         self.mlp_model2 = MLP(dim , dim // 4 , dim // 12 , 9)
         self.max_num_faces = max_num_faces
-        self.tokens = torch.randn(dim, dtype=torch.float32)
+        self.tokens = nn.Parameter(torch.randn(dim, dtype=torch.float32))
+        #self.tokens = torch.randn(dim, dtype=torch.float32)
         #self.tokens = [[1.1965, -0.1948, -0.6660],
         #                [1.3214,  1.8411,  1.3264],
         #                [-0.5045, -0.0491, -0.8510]]
-        self.tokens = nn.Parameter(torch.tensor(self.tokens))
+        #self.tokens = nn.Parameter(torch.tensor(self.tokens))
         #print("self.tokens: ",self.tokens)
         #self.tokens = nn.Parameter(torch.randn(self.max_num_faces, self.num_vertices_per_face, 3))
         self.position_encoding = self._create_sinusoidal_position_encoding(self.max_num_faces, self.d_model)
@@ -355,7 +356,7 @@ class AutoEncoder(nn.Module):
         return encode_feature
 
 
-    def encode(self, point_feature, mask):
+    def encode(self, input_tensor, mask):
 
         #face_coords = face_coords.to(self.device)
         mask = mask.to(self.device)
@@ -407,11 +408,17 @@ class AutoEncoder(nn.Module):
         raw_position_encoding = raw_position_encoding.to(self.device)
         face_coor_embed = face_coords + raw_position_encoding
         face_coor_embed[~mask] = 0
-
-        #point_feature = self.point_encoder.encode_latents(input_tensor)
-
+        '''
+        encoded_batches = []
+        for i in range(batch_size):
+            batch_input = input_tensor[i]
+            encoded_latent = self.point_encoder.encode_latents(batch_input)
+            encoded_batches.append(encoded_latent)
+        encoded_result = torch.stack(encoded_batches, dim=0)
+        '''
         #print("point_feature_shape: ",point_feature.shape)
         #pro_point_feature = point_feature
+        point_feature = self.point_encoder.encode_latents(input_tensor)
         pro_point_feature = self.process_point_feature(point_feature)
 
         return face_coor_embed , pro_point_feature # [b,nd,nf,dim] , [b,257,dim]
@@ -453,9 +460,9 @@ class AutoEncoder(nn.Module):
         # Initialize output tensor
         output = torch.zeros_like(face_coor)  # [b, num of downsample, nf, dim]
 
-        #for self_attn, self_ff in self.layers:
-        #    x = self_attn(x) + x
-        #    x = self_ff(x) + x
+        for self_attn, self_ff in self.layers:
+            x = self_attn(x) + x
+            x = self_ff(x) + x
 
         # Cross attention and feed-forward layers
         #cross_attn, cross_ff = self.cross_attend_blocks
@@ -479,6 +486,56 @@ class AutoEncoder(nn.Module):
         #res = sort_mesh_with_mask(res , mask)
 
         return res  # Shape: [b, nd, nf, 3, 3, 128]
+    
+    def decode_from_latent_to_mesh(self, face_coor, context, mask):
+        x = context  # [b, 257, dim]
+        mask = mask.to(self.device)  # [b, num of downsample, nf]
+        
+        batch_size, num_of_downsample, nf, dim = face_coor.shape
+        context_length = x.shape[1]  # 257
+        
+        # Expand mask to match the context length
+        mask1 = mask.unsqueeze(-1).expand(-1, -1, -1, context_length)  # [b, num of downsample, nf, 257]
+
+        # Initialize output tensor
+        output = torch.zeros_like(face_coor)  # [b, num of downsample, nf, dim]
+
+        for self_attn, self_ff in self.layers:
+            x = self_attn(x) + x
+            x = self_ff(x) + x
+
+        # Cross attention and feed-forward layers
+        #cross_attn, cross_ff = self.cross_attend_blocks
+
+        for i in range(num_of_downsample):
+            # Apply self-attention and feed-forward layers for the context
+
+            mask1_i = mask1[:, i, :, :]  # Select mask for the current downsample level 
+            yi = face_coor[:, i, :, :]  # [b, nf, dim] for the current downsample level
+            for cross_attn, cross_ff in self.cross_attend_blocks:
+                yi = cross_attn(yi, context=x, mask=mask1_i) + yi  # Apply cross-attention
+                yi = cross_ff(yi) + yi  # Apply feed-forward network
+                yi = yi * mask[:, i, :].unsqueeze(-1)  # Apply mask
+            # Store the result for the current downsample level
+            output[:, i, :, :] = yi
+
+        pred_face_coords = self.to_coor_logits(output) #[b,nd,nf,9,128]
+        recon_faces = undiscretize(
+                pred_face_coords.argmax(dim = -1),
+                num_discrete = self.discretize_size,
+                continuous_range = self.coor_continuous_range,
+        )#[b,nd,nf,9]
+        recon_faces = rearrange(recon_faces,'b nd nf (v c) -> b nd nf v c', v=3, c=3)
+
+        return recon_faces
+    
+    def recon_forward(self, point_feature, mask):
+
+        x,y = self.encode(point_feature,mask)
+
+        o = self.decode_from_latent_to_mesh(x, y, mask)
+
+        return o #[b,nd,nf,3,3]
 
     def forward(self, point_feature, mask):
         
